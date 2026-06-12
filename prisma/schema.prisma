@@ -1,0 +1,62 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Repository {
+  id        String   @id @default(cuid())
+  owner     String
+  name      String
+  fullName  String   @unique
+  githubId  BigInt   @unique
+  createdAt DateTime @default(now())
+
+  issues     Issue[]
+  importJobs ImportJob[]
+}
+
+model Issue {
+  id              String   @id @default(cuid())
+  githubIssueId   BigInt   @unique
+  issueNumber     Int
+  title           String
+  body            String?
+  state           String
+  author          String
+  githubUrl       String
+  createdAtGithub DateTime
+  importedAt      DateTime @default(now())
+
+  repositoryId String
+  repository   Repository @relation(fields: [repositoryId], references: [id])
+
+  analysis IssueAnalysis?
+}
+
+model ImportJob {
+  id          String    @id @default(cuid())
+  status      String
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  repositoryId String
+  repository   Repository @relation(fields: [repositoryId], references: [id])
+}
+
+model IssueAnalysis {
+  id             String   @id @default(cuid())
+  summary        String?
+  category       String?
+  priority       String?
+  effort         String?
+  suggestedReply String?
+
+  issueId String @unique
+  issue   Issue  @relation(fields: [issueId], references: [id])
+
+  createdAt DateTime @default(now())
+}
