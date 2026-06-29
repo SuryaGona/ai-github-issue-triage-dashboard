@@ -106,47 +106,45 @@ export default function ConnectPage() {
                   className="min-h-12 min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-950/60 px-4 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-white/40"
                 />
 
-<button
-  type="submit"
-  disabled={isLoading}
-  className="group relative inline-flex min-h-12 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-white/10 bg-white px-6 text-sm font-medium text-slate-950 shadow-xl shadow-black/30 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-white/10 disabled:cursor-not-allowed disabled:opacity-60"
->
-  <div className="relative z-10 flex items-center gap-2">
-    {isLoading && (
-      <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400 border-t-slate-950" />
-    )}
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="group relative inline-flex min-h-12 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-white/10 bg-white px-6 text-sm font-medium text-slate-950 shadow-xl shadow-black/30 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <div className="relative z-10 flex items-center gap-2">
+                    {isLoading && (
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400 border-t-slate-950" />
+                    )}
 
-    <span>
-      {isLoading ? "Importing..." : "Analyze"}
-    </span>
-  </div>
+                    <span>{isLoading ? "Importing..." : "Analyze"}</span>
+                  </div>
 
-  <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
-</button>
+                  <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
+                </button>
               </div>
 
               <div className="mt-5">
-              <p className="text-sm text-slate-400">
-  Click an example to fill the input.
-</p>
+                <p className="text-sm text-slate-400">
+                  Click an example to fill the input.
+                </p>
 
-  <div className="mt-3 flex flex-wrap gap-2">
-    {[
-      "https://github.com/facebook/react",
-      "https://github.com/vercel/next.js",
-      "https://github.com/microsoft/vscode",
-    ].map((example) => (
-      <button
-        key={example}
-        type="button"
-        onClick={() => setRepoUrl(example)}
-        className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-300 transition hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-blue-200"
-      >
-        {example.replace("https://github.com/", "")} ↗
-      </button>
-    ))}
-  </div>
-</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {[
+                    "https://github.com/openai/openai-python",
+                    "https://github.com/huggingface/transformers",
+                    "https://github.com/microsoft/vscode",
+                  ].map((example) => (
+                    <button
+                      key={example}
+                      type="button"
+                      onClick={() => setRepoUrl(example)}
+                      className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-300 transition hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-blue-200"
+                    >
+                      {example.replace("https://github.com/", "")} ↗
+                    </button>
+                  ))}
+                </div>
+              </div>
             </form>
 
             {error && (
