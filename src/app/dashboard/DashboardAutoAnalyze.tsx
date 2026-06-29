@@ -12,7 +12,9 @@ export default function DashboardAutoAnalyze({
 }) {
   const router = useRouter();
   const [status, setStatus] = useState<AnalyzeStatus>("loading");
-  const [message, setMessage] = useState("Analyzing issues with AI...");
+  const [message, setMessage] = useState(
+  "AI analysis is running. This may take 10–20 seconds depending on the repository..."
+);
 
   useEffect(() => {
     let cancelled = false;
