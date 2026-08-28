@@ -1,5 +1,28 @@
 import { prisma } from "@/lib/prisma";
 
+type GitHubRepositoryResponse = {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: {
+    login: string;
+  };
+};
+
+type GitHubIssueResponse = {
+  id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  html_url: string;
+  created_at: string;
+  user: {
+    login: string;
+  };
+  pull_request?: unknown;
+};
+
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -168,7 +191,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const repoData = await githubResponse.json();
+    const repoData: GitHubRepositoryResponse = await githubResponse.json();
 
     const issuesResponse = await fetchWithRetry(
       `https://api.github.com/repos/${owner}/${repoName}/issues?state=open&per_page=100`
@@ -181,10 +204,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const githubIssues = await issuesResponse.json();
+    const githubIssues: GitHubIssueResponse[] = await issuesResponse.json();
 
     const realIssues = githubIssues
-      .filter((issue: any) => !issue.pull_request)
+      .filter((issue) => !issue.pull_request)
       .slice(0, 10);
 
     const repository = await dbWithRetry("repository upsert", () =>

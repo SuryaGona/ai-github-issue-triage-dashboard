@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
 type Issue = {
@@ -67,12 +68,12 @@ export default function ConnectPage() {
       </div>
 
       <section className="relative mx-auto w-full max-w-6xl px-6 py-8">
-        <a
+        <Link
           href="/"
           className="inline-flex text-sm text-slate-400 transition hover:text-white"
         >
-          ← Back home
-        </a>
+          {"\u2190"} Back home
+        </Link>
 
         <div className="mt-10 grid w-full min-w-0 gap-10 lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start">
           <div className="min-w-0">
@@ -140,7 +141,7 @@ export default function ConnectPage() {
                       onClick={() => setRepoUrl(example)}
                       className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-300 transition hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-blue-200"
                     >
-                      {example.replace("https://github.com/", "")} ↗
+                      {example.replace("https://github.com/", "")} {"\u2192"}
                     </button>
                   ))}
                 </div>
@@ -198,7 +199,7 @@ export default function ConnectPage() {
 
                     <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
                       <span>{issue.state}</span>
-                      <span>·</span>
+                      <span>{"\u00B7"}</span>
                       <span>{issue.author}</span>
                     </div>
                   </div>
@@ -224,14 +225,14 @@ export default function ConnectPage() {
             </div>
 
             {importJobId && (
-              <a
+              <Link
                 href={`/dashboard?jobId=${importJobId}`}
                 className="group relative mt-5 flex w-full items-center justify-center overflow-hidden rounded-xl border border-white/10 bg-white px-5 py-3 text-sm font-medium text-slate-950 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-200"
               >
                 <span className="relative z-10">Open dashboard</span>
 
                 <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
-              </a>
+              </Link>
             )}
           </div>
         </div>
