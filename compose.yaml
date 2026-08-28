@@ -1,0 +1,39 @@
+services:
+  postgres-dev:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: triage
+      POSTGRES_PASSWORD: triage_local
+      POSTGRES_DB: triage_dev
+    ports:
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - triage_postgres_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U triage -d triage_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  postgres-test:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: triage
+      POSTGRES_PASSWORD: triage_test
+      POSTGRES_DB: triage_test
+    ports:
+      - "127.0.0.1:5436:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U triage -d triage_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+volumes:
+  triage_postgres_dev:

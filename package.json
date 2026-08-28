@@ -6,13 +6,23 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:up": "docker compose up -d postgres-dev postgres-test",
+    "db:down": "docker compose down",
+    "db:status": "docker compose ps",
+    "db:logs": "docker compose logs -f postgres-dev postgres-test",
+    "db:dev:push": "cross-env DATABASE_URL=postgresql://triage:triage_local@127.0.0.1:5435/triage_dev prisma db push",
+    "db:test:push": "cross-env DATABASE_URL=postgresql://triage:triage_test@127.0.0.1:5436/triage_test prisma db push",
+    "db:dev:reset": "cross-env DATABASE_URL=postgresql://triage:triage_local@127.0.0.1:5435/triage_dev prisma db push --force-reset",
+    "db:test:reset": "cross-env DATABASE_URL=postgresql://triage:triage_test@127.0.0.1:5436/triage_test prisma db push --force-reset"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
     "@prisma/adapter-neon": "^7.8.0",
+    "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "next": "16.2.6",
+    "pg": "^8.23.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
@@ -21,6 +31,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "cross-env": "^10.1.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "prisma": "^7.8.0",
