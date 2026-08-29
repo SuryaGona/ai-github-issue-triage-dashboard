@@ -1,3 +1,11 @@
+import { randomUUID } from "node:crypto";
+
+import {
+  fetchWithTimeout,
+  isRetryableHttpStatus,
+  retryDelayMs,
+  wait,
+} from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 
@@ -38,8 +46,18 @@ type AnalysisInput = {
   body: string | null;
 };
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+const ANALYSIS_LEASE_MS = 3 * 60 * 1000;
+
+const GEMINI_TIMEOUT_MS = 30_000;
+const GEMINI_RETRY_ATTEMPTS = 3;
+const GEMINI_RETRY_BASE_DELAY_MS = 1_000;
+const MAX_RETRY_AFTER_MS = 5_000;
+
+class NonRetryableGeminiError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonRetryableGeminiError";
+  }
 }
 
 function createGeminiResponseSchema(issues: AnalysisInput[]) {
@@ -101,7 +119,10 @@ function createGeminiResponseSchema(issues: AnalysisInput[]) {
   };
 }
 
-function validateGeminiResult(rawResult: unknown, issues: AnalysisInput[]) {
+function validateGeminiResult(
+  rawResult: unknown,
+  issues: AnalysisInput[]
+) {
   const parsed = geminiBatchSchema.parse(rawResult);
 
   if (parsed.issues.length !== issues.length) {
@@ -110,7 +131,10 @@ function validateGeminiResult(rawResult: unknown, issues: AnalysisInput[]) {
     );
   }
 
-  const expectedIssueIds = new Set(issues.map((issue) => issue.id));
+  const expectedIssueIds = new Set(
+    issues.map((issue) => issue.id)
+  );
+
   const returnedIssueIds = new Set<string>();
 
   for (const result of parsed.issues) {
@@ -131,26 +155,58 @@ function validateGeminiResult(rawResult: unknown, issues: AnalysisInput[]) {
 
   for (const issueId of expectedIssueIds) {
     if (!returnedIssueIds.has(issueId)) {
-      throw new Error(`Gemini omitted analysis for issue ${issueId}.`);
+      throw new Error(
+        `Gemini omitted analysis for issue ${issueId}.`
+      );
     }
   }
 
   return parsed;
 }
 
+function getRetryAfterMs(response: Response) {
+  const retryAfter = response.headers.get("retry-after");
+
+  if (!retryAfter) {
+    return null;
+  }
+
+  const seconds = Number(retryAfter);
+
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(
+      seconds * 1000,
+      MAX_RETRY_AFTER_MS
+    );
+  }
+
+  const retryAt = Date.parse(retryAfter);
+
+  if (Number.isNaN(retryAt)) {
+    return null;
+  }
+
+  return Math.min(
+    Math.max(0, retryAt - Date.now()),
+    MAX_RETRY_AFTER_MS
+  );
+}
+
 async function geminiBatchWithRetry(
   issues: AnalysisInput[],
-  attempts = 3
+  signal?: AbortSignal,
+  attempts = GEMINI_RETRY_ATTEMPTS
 ) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const response = await fetch(
+      const response = await fetchWithTimeout(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
+          signal,
           body: JSON.stringify({
             contents: [
               {
@@ -207,18 +263,45 @@ async function geminiBatchWithRetry(
             ],
             generationConfig: {
               responseMimeType: "application/json",
-              responseJsonSchema: createGeminiResponseSchema(issues),
+              responseJsonSchema:
+                createGeminiResponseSchema(issues),
             },
           }),
-        }
+        },
+        GEMINI_TIMEOUT_MS
       );
 
       if (!response.ok) {
-        throw new Error(`Gemini request failed with status ${response.status}`);
+        const message =
+          `Gemini request failed with status ${response.status}`;
+
+        if (!isRetryableHttpStatus(response.status)) {
+          throw new NonRetryableGeminiError(message);
+        }
+
+        if (attempt === attempts) {
+          throw new Error(message);
+        }
+
+        console.log(
+          `Gemini batch attempt ${attempt} failed`
+        );
+
+        const delay =
+          getRetryAfterMs(response) ??
+          retryDelayMs(
+            attempt,
+            GEMINI_RETRY_BASE_DELAY_MS
+          );
+
+        await wait(delay);
+        continue;
       }
 
       const data = await response.json();
-      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      const content =
+        data.candidates?.[0]?.content?.parts?.[0]?.text;
 
       if (!content || typeof content !== "string") {
         throw new Error("Gemini returned no content.");
@@ -226,22 +309,70 @@ async function geminiBatchWithRetry(
 
       const parsedContent: unknown = JSON.parse(content);
 
-      return validateGeminiResult(parsedContent, issues);
+      return validateGeminiResult(
+        parsedContent,
+        issues
+      );
     } catch (error) {
-      console.log(`Gemini batch attempt ${attempt} failed`);
+      if (error instanceof NonRetryableGeminiError) {
+        throw error;
+      }
+
+      if (signal?.aborted) {
+        throw error;
+      }
+
+      console.log(
+        `Gemini batch attempt ${attempt} failed`
+      );
 
       if (attempt === attempts) {
         throw error;
       }
 
-      await wait(2000 * attempt);
+      await wait(
+        retryDelayMs(
+          attempt,
+          GEMINI_RETRY_BASE_DELAY_MS
+        )
+      );
     }
   }
 
-  throw new Error("Gemini batch failed after retries.");
+  throw new Error(
+    "Gemini batch failed after retries."
+  );
+}
+
+async function releaseAnalysisLease(
+  importJobId: string,
+  leaseId: string
+) {
+  try {
+    await prisma.importJob.updateMany({
+      where: {
+        id: importJobId,
+        status: "analyzing",
+        analysisLeaseId: leaseId,
+      },
+      data: {
+        status: "completed",
+        analysisLeaseId: null,
+        analysisStartedAt: null,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "ANALYSIS_LEASE_RELEASE_ERROR:",
+      error
+    );
+  }
 }
 
 export async function POST(request: Request) {
+  let claimedImportJobId: string | null = null;
+  let analysisLeaseId: string | null = null;
+
   try {
     const body: unknown = await request.json();
 
@@ -253,7 +384,10 @@ export async function POST(request: Request) {
 
     if (!requestResult.success) {
       return Response.json(
-        { success: false, error: "importJobId is required." },
+        {
+          success: false,
+          error: "importJobId is required.",
+        },
         { status: 400 }
       );
     }
@@ -262,84 +396,245 @@ export async function POST(request: Request) {
 
     if (!process.env.GEMINI_API_KEY) {
       return Response.json(
-        { success: false, error: "GEMINI_API_KEY is missing from .env." },
+        {
+          success: false,
+          error:
+            "GEMINI_API_KEY is missing from .env.",
+        },
         { status: 500 }
       );
     }
 
-    const importJob = await prisma.importJob.findUnique({
-      where: {
-        id: importJobId,
-      },
-      include: {
-        repository: {
-          include: {
-            issues: {
-              include: {
-                analysis: true,
+    const leaseId = randomUUID();
+    const now = new Date();
+
+    const staleBefore = new Date(
+      now.getTime() - ANALYSIS_LEASE_MS
+    );
+
+    const claimResult =
+      await prisma.importJob.updateMany({
+        where: {
+          id: importJobId,
+          OR: [
+            {
+              status: "completed",
+            },
+            {
+              status: "analyzing",
+              analysisStartedAt: {
+                lt: staleBefore,
               },
-              take: 10,
-              orderBy: {
-                importedAt: "desc",
+            },
+            {
+              status: "analyzing",
+              analysisStartedAt: null,
+            },
+          ],
+        },
+        data: {
+          status: "analyzing",
+          analysisLeaseId: leaseId,
+          analysisStartedAt: now,
+        },
+      });
+
+    if (claimResult.count !== 1) {
+      const currentJob =
+        await prisma.importJob.findUnique({
+          where: {
+            id: importJobId,
+          },
+          select: {
+            status: true,
+          },
+        });
+
+      if (!currentJob) {
+        return Response.json(
+          {
+            success: false,
+            error: "Import job not found.",
+          },
+          { status: 404 }
+        );
+      }
+
+      if (currentJob.status === "analyzed") {
+        return Response.json({
+          success: true,
+          analyzedCount: 0,
+          message:
+            "All issues already analyzed.",
+        });
+      }
+
+      if (currentJob.status === "analyzing") {
+        return Response.json(
+          {
+            success: false,
+            error:
+              "AI analysis is already in progress.",
+          },
+          { status: 409 }
+        );
+      }
+
+      return Response.json(
+        {
+          success: false,
+          error:
+            "Import job is not ready for analysis.",
+        },
+        { status: 409 }
+      );
+    }
+
+    claimedImportJobId = importJobId;
+    analysisLeaseId = leaseId;
+
+    const importJob =
+      await prisma.importJob.findUnique({
+        where: {
+          id: importJobId,
+        },
+        include: {
+          repository: {
+            include: {
+              issues: {
+                include: {
+                  analysis: true,
+                },
+                take: 10,
+                orderBy: {
+                  importedAt: "desc",
+                },
               },
             },
           },
         },
-      },
-    });
+      });
 
     if (!importJob) {
-      return Response.json(
-        { success: false, error: "Import job not found." },
-        { status: 404 }
+      throw new Error(
+        "Claimed import job disappeared."
       );
     }
 
-    const issuesNeedingAnalysis = importJob.repository.issues.filter(
-      (issue) => !issue.analysis
-    );
+    const issuesNeedingAnalysis =
+      importJob.repository.issues.filter(
+        (issue) => !issue.analysis
+      );
 
     if (issuesNeedingAnalysis.length === 0) {
+      const finalizeResult =
+        await prisma.importJob.updateMany({
+          where: {
+            id: importJobId,
+            status: "analyzing",
+            analysisLeaseId: leaseId,
+          },
+          data: {
+            status: "analyzed",
+            analysisLeaseId: null,
+            analysisStartedAt: null,
+          },
+        });
+
+      if (finalizeResult.count !== 1) {
+        throw new Error(
+          "Analysis lease was lost before finalization."
+        );
+      }
+
+      claimedImportJobId = null;
+      analysisLeaseId = null;
+
       return Response.json({
         success: true,
         repo: importJob.repository.fullName,
         analyzedCount: 0,
-        message: "All issues already analyzed.",
+        message:
+          "All issues already analyzed.",
       });
     }
 
-    const aiInput = issuesNeedingAnalysis.map((issue) => ({
-      id: issue.id,
-      title: issue.title,
-      body: issue.body,
-    }));
+    const aiInput =
+      issuesNeedingAnalysis.map((issue) => ({
+        id: issue.id,
+        title: issue.title,
+        body: issue.body,
+      }));
 
-    const aiResult = await geminiBatchWithRetry(aiInput);
+    const aiResult =
+      await geminiBatchWithRetry(
+        aiInput,
+        request.signal
+      );
 
-    const savedAnalyses = await prisma.$transaction(
-      aiResult.issues.map((result) =>
-        prisma.issueAnalysis.upsert({
-          where: {
-            issueId: result.issueId,
-          },
-          update: {
-            summary: result.summary,
-            category: result.category,
-            priority: result.priority,
-            effort: result.effort,
-            suggestedReply: result.suggestedReply,
-          },
-          create: {
-            issueId: result.issueId,
-            summary: result.summary,
-            category: result.category,
-            priority: result.priority,
-            effort: result.effort,
-            suggestedReply: result.suggestedReply,
-          },
-        })
-      )
-    );
+    const savedAnalyses =
+      await prisma.$transaction(
+        async (tx) => {
+          const saved = [];
+
+          for (const result of aiResult.issues) {
+            const savedAnalysis =
+              await tx.issueAnalysis.upsert({
+                where: {
+                  issueId: result.issueId,
+                },
+                update: {
+                  summary: result.summary,
+                  category: result.category,
+                  priority: result.priority,
+                  effort: result.effort,
+                  suggestedReply:
+                    result.suggestedReply,
+                },
+                create: {
+                  issueId: result.issueId,
+                  summary: result.summary,
+                  category: result.category,
+                  priority: result.priority,
+                  effort: result.effort,
+                  suggestedReply:
+                    result.suggestedReply,
+                },
+              });
+
+            saved.push(savedAnalysis);
+          }
+
+          const finalizeResult =
+            await tx.importJob.updateMany({
+              where: {
+                id: importJobId,
+                status: "analyzing",
+                analysisLeaseId: leaseId,
+              },
+              data: {
+                status: "analyzed",
+                analysisLeaseId: null,
+                analysisStartedAt: null,
+              },
+            });
+
+          if (finalizeResult.count !== 1) {
+            throw new Error(
+              "Analysis lease was lost before persistence completed."
+            );
+          }
+
+          return saved;
+        },
+        {
+          maxWait: 5_000,
+          timeout: 10_000,
+        }
+      );
+
+    claimedImportJobId = null;
+    analysisLeaseId = null;
 
     return Response.json({
       success: true,
@@ -348,6 +643,16 @@ export async function POST(request: Request) {
       analyses: savedAnalyses,
     });
   } catch (error) {
+    if (
+      claimedImportJobId &&
+      analysisLeaseId
+    ) {
+      await releaseAnalysisLease(
+        claimedImportJobId,
+        analysisLeaseId
+      );
+    }
+
     console.error("ANALYZE_ERROR:", error);
 
     return Response.json(

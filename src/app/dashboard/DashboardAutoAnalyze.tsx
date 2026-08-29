@@ -11,12 +11,16 @@ export default function DashboardAutoAnalyze({
   importJobId: string;
 }) {
   const router = useRouter();
-  const [status, setStatus] = useState<AnalyzeStatus>("loading");
+
+  const [status, setStatus] =
+    useState<AnalyzeStatus>("loading");
+
   const [message, setMessage] = useState(
-  "AI analysis is running. This may take 10 to 20 seconds depending on the repository..."
-);
+    "AI analysis is running. This may take 10 to 20 seconds depending on the repository..."
+  );
 
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
 
     async function runAnalysis() {
@@ -29,33 +33,54 @@ export default function DashboardAutoAnalyze({
           body: JSON.stringify({
             importJobId,
           }),
+          signal: controller.signal,
         });
 
         const data = await response.json();
 
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
 
         if (!response.ok) {
           setStatus("error");
-          setMessage(data.error || "AI analysis failed.");
+          setMessage(
+            data.error || "AI analysis failed."
+          );
           return;
         }
 
         setStatus("success");
-        setMessage("AI analysis complete.");
+
+        setMessage(
+          data.analyzedCount === 0
+            ? "AI analysis is already complete."
+            : "AI analysis complete."
+        );
+
         router.refresh();
-      } catch {
-        if (cancelled) return;
+      } catch (error) {
+        if (
+          cancelled ||
+          controller.signal.aborted ||
+          (error instanceof DOMException &&
+            error.name === "AbortError")
+        ) {
+          return;
+        }
 
         setStatus("error");
-        setMessage("AI analysis failed. Please refresh and try again.");
+        setMessage(
+          "AI analysis failed. Please refresh and try again."
+        );
       }
     }
 
-    runAnalysis();
+    void runAnalysis();
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [importJobId, router]);
 
@@ -86,10 +111,10 @@ export default function DashboardAutoAnalyze({
           <div className="h-2.5 w-2.5 rounded-full bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.8)]" />
         )}
 
-        <p className="text-sm font-medium">{message}</p>
+        <p className="text-sm font-medium">
+          {message}
+        </p>
       </div>
-
-      
     </div>
   );
 }

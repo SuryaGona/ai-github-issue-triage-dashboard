@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Issue = {
   id: string;
@@ -19,8 +19,24 @@ export default function ConnectPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  const importControllerRef =
+    useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      importControllerRef.current?.abort();
+    };
+  }, []);
+
+  async function handleSubmit(
+    event: React.FormEvent<HTMLFormElement>
+  ) {
     event.preventDefault();
+
+    importControllerRef.current?.abort();
+
+    const controller = new AbortController();
+    importControllerRef.current = controller;
 
     setError("");
     setSubmittedRepo("");
@@ -28,34 +44,58 @@ export default function ConnectPage() {
     setIssues([]);
     setIsLoading(true);
 
-    const response = await fetch("/api/import", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ repoUrl }),
-    });
-
-    let data;
-
     try {
-      data = await response.json();
-    } catch {
-      setIsLoading(false);
-      setError("Server crashed. Check the terminal for the real backend error.");
-      return;
+      const response = await fetch("/api/import", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          repoUrl,
+        }),
+        signal: controller.signal,
+      });
+
+      const data = await response.json();
+
+      if (
+        controller.signal.aborted ||
+        importControllerRef.current !== controller
+      ) {
+        return;
+      }
+
+      if (!response.ok) {
+        setError(
+          data.error || "Something went wrong."
+        );
+        return;
+      }
+
+      setSubmittedRepo(data.repo);
+      setImportJobId(data.importJobId);
+      setIssues(data.issues || []);
+    } catch (requestError) {
+      if (
+        controller.signal.aborted ||
+        importControllerRef.current !== controller ||
+        (requestError instanceof DOMException &&
+          requestError.name === "AbortError")
+      ) {
+        return;
+      }
+
+      setError(
+        "Import failed. Please try again."
+      );
+    } finally {
+      if (
+        importControllerRef.current === controller
+      ) {
+        importControllerRef.current = null;
+        setIsLoading(false);
+      }
     }
-
-    setIsLoading(false);
-
-    if (!response.ok) {
-      setError(data.error || "Something went wrong.");
-      return;
-    }
-
-    setSubmittedRepo(data.repo);
-    setImportJobId(data.importJobId);
-    setIssues(data.issues || []);
   }
 
   return (
@@ -102,7 +142,9 @@ export default function ConnectPage() {
                 <input
                   type="text"
                   value={repoUrl}
-                  onChange={(event) => setRepoUrl(event.target.value)}
+                  onChange={(event) =>
+                    setRepoUrl(event.target.value)
+                  }
                   placeholder="Paste a public GitHub repo URL"
                   className="min-h-12 min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-950/60 px-4 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-white/40"
                 />
@@ -117,7 +159,11 @@ export default function ConnectPage() {
                       <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400 border-t-slate-950" />
                     )}
 
-                    <span>{isLoading ? "Importing..." : "Analyze"}</span>
+                    <span>
+                      {isLoading
+                        ? "Importing..."
+                        : "Analyze"}
+                    </span>
                   </div>
 
                   <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
@@ -138,10 +184,16 @@ export default function ConnectPage() {
                     <button
                       key={example}
                       type="button"
-                      onClick={() => setRepoUrl(example)}
+                      onClick={() =>
+                        setRepoUrl(example)
+                      }
                       className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-300 transition hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-blue-200"
                     >
-                      {example.replace("https://github.com/", "")} {"\u2192"}
+                      {example.replace(
+                        "https://github.com/",
+                        ""
+                      )}{" "}
+                      {"\u2192"}
                     </button>
                   ))}
                 </div>
@@ -169,7 +221,9 @@ export default function ConnectPage() {
 
           <div className="min-w-0 rounded-[24px] border border-white/10 bg-white/[0.04] p-4 shadow-xl shadow-black/25 backdrop-blur-2xl">
             <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium text-slate-300">Preview</p>
+              <p className="text-sm font-medium text-slate-300">
+                Preview
+              </p>
 
               <div className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-slate-400">
                 {submittedRepo
@@ -181,29 +235,41 @@ export default function ConnectPage() {
             </div>
 
             <div className="mt-5 space-y-3">
-              {submittedRepo && issues.length === 0 ? (
+              {submittedRepo &&
+              issues.length === 0 ? (
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
                   No open issues found for this repository.
                 </div>
               ) : issues.length > 0 ? (
-                issues.slice(0, 4).map((issue, index) => (
-                  <div
-                    key={issue.id}
-                    className={`rounded-2xl border border-white/10 bg-white/[0.03] p-4 ${
-                      index === 3 ? "opacity-40 blur-[0.5px]" : ""
-                    }`}
-                  >
-                    <p className="line-clamp-2 break-words text-sm font-medium text-slate-200">
-                      #{issue.number} {issue.title}
-                    </p>
+                issues
+                  .slice(0, 4)
+                  .map((issue, index) => (
+                    <div
+                      key={issue.id}
+                      className={`rounded-2xl border border-white/10 bg-white/[0.03] p-4 ${
+                        index === 3
+                          ? "opacity-40 blur-[0.5px]"
+                          : ""
+                      }`}
+                    >
+                      <p className="line-clamp-2 break-words text-sm font-medium text-slate-200">
+                        #{issue.number}{" "}
+                        {issue.title}
+                      </p>
 
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-                      <span>{issue.state}</span>
-                      <span>{"\u00B7"}</span>
-                      <span>{issue.author}</span>
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                        <span>
+                          {issue.state}
+                        </span>
+                        <span>
+                          {"\u00B7"}
+                        </span>
+                        <span>
+                          {issue.author}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  ))
               ) : (
                 <>
                   <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
@@ -229,7 +295,9 @@ export default function ConnectPage() {
                 href={`/dashboard?jobId=${importJobId}`}
                 className="group relative mt-5 flex w-full items-center justify-center overflow-hidden rounded-xl border border-white/10 bg-white px-5 py-3 text-sm font-medium text-slate-950 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-200"
               >
-                <span className="relative z-10">Open dashboard</span>
+                <span className="relative z-10">
+                  Open dashboard
+                </span>
 
                 <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
               </Link>

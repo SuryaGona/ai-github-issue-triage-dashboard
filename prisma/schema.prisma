@@ -38,10 +38,12 @@ model Issue {
 }
 
 model ImportJob {
-  id          String    @id @default(cuid())
-  status      String
-  startedAt   DateTime  @default(now())
-  completedAt DateTime?
+  id                String    @id @default(cuid())
+  status            String
+  startedAt         DateTime  @default(now())
+  completedAt       DateTime?
+  analysisLeaseId   String?   @unique
+  analysisStartedAt DateTime?
 
   repositoryId String
   repository   Repository @relation(fields: [repositoryId], references: [id])

@@ -776,6 +776,8 @@ export const ImportJobScalarFieldEnum = {
   status: 'status',
   startedAt: 'startedAt',
   completedAt: 'completedAt',
+  analysisLeaseId: 'analysisLeaseId',
+  analysisStartedAt: 'analysisStartedAt',
   repositoryId: 'repositoryId'
 } as const
 
