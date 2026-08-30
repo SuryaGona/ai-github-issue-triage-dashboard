@@ -17,7 +17,9 @@
     "db:dev:push": "cross-env DATABASE_URL=postgresql://triage:triage_local@127.0.0.1:5435/triage_dev prisma db push",
     "db:test:push": "cross-env DATABASE_URL=postgresql://triage:triage_test@127.0.0.1:5436/triage_test prisma db push",
     "db:dev:reset": "cross-env DATABASE_URL=postgresql://triage:triage_local@127.0.0.1:5435/triage_dev prisma db push --force-reset",
-    "db:test:reset": "cross-env DATABASE_URL=postgresql://triage:triage_test@127.0.0.1:5436/triage_test prisma db push --force-reset"
+    "db:test:reset": "cross-env DATABASE_URL=postgresql://triage:triage_test@127.0.0.1:5436/triage_test prisma db push --force-reset",
+    "test:integration": "vitest run --config vitest.integration.config.mts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
