@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:eval": "vitest run --config vitest.eval.config.mts",
     "db:up": "docker compose up -d postgres-dev postgres-test",
     "db:down": "docker compose down",
     "db:status": "docker compose ps",

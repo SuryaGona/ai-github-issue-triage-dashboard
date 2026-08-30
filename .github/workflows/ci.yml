@@ -71,6 +71,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: AI evaluation suite
+        run: npm run test:eval
+
       - name: Database integration tests
         run: npm run test:integration
 
