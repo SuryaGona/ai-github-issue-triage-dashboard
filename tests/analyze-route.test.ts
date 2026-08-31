@@ -1891,6 +1891,137 @@ describe(
     );
 
     it(
+      "retries malformed Gemini response envelopes and never starts persistence",
+      async () => {
+        mockReadyImportJob([
+          unanalyzedIssue(
+            "issue-1",
+          ),
+        ]);
+
+        httpMocks.fetchWithTimeout.mockResolvedValue(
+          new Response(
+            JSON.stringify({}),
+            {
+              status: 200,
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
+            },
+          ),
+        );
+
+        const consoleLogSpy =
+          vi
+            .spyOn(
+              console,
+              "log",
+            )
+            .mockImplementation(
+              () =>
+                undefined,
+            );
+
+        const consoleErrorSpy =
+          vi
+            .spyOn(
+              console,
+              "error",
+            )
+            .mockImplementation(
+              () =>
+                undefined,
+            );
+
+        const response =
+          await POST(
+            analyzeRequest(
+              "job-1",
+            ),
+          );
+
+        await expectControlledFailure(
+          response,
+        );
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          3,
+        );
+
+        expect(
+          httpMocks.wait,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        expect(
+          prismaMocks.transaction,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).not.toHaveBeenCalled();
+
+        const leaseId =
+          getClaimedLeaseId();
+
+        expect(
+          prismaMocks.importJobUpdateMany,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        expect(
+          prismaMocks.importJobUpdateMany,
+        ).toHaveBeenNthCalledWith(
+          2,
+          {
+            where: {
+              id: "job-1",
+              status:
+                "analyzing",
+              analysisLeaseId:
+                leaseId,
+            },
+            data: {
+              status:
+                "completed",
+              analysisLeaseId:
+                null,
+              analysisStartedAt:
+                null,
+            },
+          },
+        );
+
+        expect(
+          consoleLogSpy,
+        ).toHaveBeenCalledWith(
+          "Gemini batch attempt 1 failed",
+        );
+
+        expect(
+          consoleLogSpy,
+        ).toHaveBeenCalledWith(
+          "Gemini batch attempt 2 failed",
+        );
+
+        expect(
+          consoleLogSpy,
+        ).toHaveBeenCalledWith(
+          "Gemini batch attempt 3 failed",
+        );
+
+        expect(
+          consoleErrorSpy,
+        ).toHaveBeenCalled();
+      },
+    );
+
+    it(
       "rejects a batch containing an invalid enum value before persistence",
       async () => {
         await runRejectedGeminiBatch(

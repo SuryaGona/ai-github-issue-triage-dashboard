@@ -449,6 +449,129 @@ describe(
     );
 
     it(
+      "rejects malformed GitHub repository data without writing to the database",
+      async () => {
+        httpMocks.fetchWithTimeout.mockResolvedValueOnce(
+          jsonResponse({
+            id: "not-a-number",
+            name: "repo",
+            full_name: "octo/repo",
+            owner: {
+              login: "octo",
+            },
+          }),
+        );
+
+        const consoleErrorSpy =
+          vi.spyOn(
+            console,
+            "error",
+          ).mockImplementation(
+            () => undefined,
+          );
+
+        const response = await POST(
+          importRequest(
+            "https://github.com/octo/repo",
+          ),
+        );
+
+        expect(
+          response.status,
+        ).toBe(502);
+
+        await expect(
+          response.json(),
+        ).resolves.toEqual({
+          success: false,
+          error:
+            "GitHub repository data is temporarily unavailable.",
+        });
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.transaction,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          consoleErrorSpy,
+        ).toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "rejects malformed GitHub issue data without persisting a partial import",
+      async () => {
+        httpMocks.fetchWithTimeout
+          .mockResolvedValueOnce(
+            jsonResponse(
+              makeRepositoryResponse(),
+            ),
+          )
+          .mockResolvedValueOnce(
+            jsonResponse([
+              {
+                ...makeGitHubIssue(
+                  7000,
+                ),
+                created_at:
+                  "not-a-date",
+              },
+            ]),
+          );
+
+        const consoleErrorSpy =
+          vi.spyOn(
+            console,
+            "error",
+          ).mockImplementation(
+            () => undefined,
+          );
+
+        const response = await POST(
+          importRequest(
+            "https://github.com/octo/repo",
+          ),
+        );
+
+        expect(
+          response.status,
+        ).toBe(502);
+
+        await expect(
+          response.json(),
+        ).resolves.toEqual({
+          success: false,
+          error:
+            "GitHub issues are temporarily unavailable.",
+        });
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        expect(
+          prismaMocks.transaction,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          prismaMocks.issueCreateMany,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          consoleErrorSpy,
+        ).toHaveBeenCalled();
+      },
+    );
+
+    it(
       "paginates GitHub issues, filters pull requests, deduplicates issues, and imports up to the safe limit",
       async () => {
         const pageOneRealIssues =
