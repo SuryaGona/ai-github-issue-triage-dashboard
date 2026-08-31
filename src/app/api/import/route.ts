@@ -29,15 +29,60 @@ type GitHubIssueResponse = {
   pull_request?: unknown;
 };
 
+type GitHubIssuesFetchResult =
+  | {
+      success: true;
+      issues: GitHubIssueResponse[];
+    }
+  | {
+      success: false;
+      response: Response;
+    };
+
 const GITHUB_TIMEOUT_MS = 8_000;
 const GITHUB_RETRY_ATTEMPTS = 3;
 const GITHUB_RETRY_BASE_DELAY_MS = 500;
 const MAX_RETRY_AFTER_MS = 5_000;
 
+const GITHUB_ISSUES_PER_PAGE = 100;
+const DEFAULT_MAX_IMPORTED_ISSUES = 100;
+const HARD_MAX_IMPORTED_ISSUES = 500;
+const MAX_GITHUB_ISSUE_PAGES = 10;
+
 const ANALYSIS_LEASE_MS = 3 * 60 * 1000;
 
+class ActiveAnalysisConflictError extends Error {
+  constructor() {
+    super(
+      "A current analysis is still running for this repository.",
+    );
+
+    this.name = "ActiveAnalysisConflictError";
+  }
+}
+
+function getMaxImportedIssues() {
+  const configuredLimit = Number.parseInt(
+    process.env.GITHUB_IMPORT_MAX_ISSUES ?? "",
+    10,
+  );
+
+  if (
+    !Number.isInteger(configuredLimit) ||
+    configuredLimit <= 0
+  ) {
+    return DEFAULT_MAX_IMPORTED_ISSUES;
+  }
+
+  return Math.min(
+    configuredLimit,
+    HARD_MAX_IMPORTED_ISSUES,
+  );
+}
+
 function getRetryAfterMs(response: Response) {
-  const retryAfter = response.headers.get("retry-after");
+  const retryAfter =
+    response.headers.get("retry-after");
 
   if (!retryAfter) {
     return null;
@@ -45,10 +90,13 @@ function getRetryAfterMs(response: Response) {
 
   const seconds = Number(retryAfter);
 
-  if (Number.isFinite(seconds) && seconds >= 0) {
+  if (
+    Number.isFinite(seconds) &&
+    seconds >= 0
+  ) {
     return Math.min(
       seconds * 1000,
-      MAX_RETRY_AFTER_MS
+      MAX_RETRY_AFTER_MS,
     );
   }
 
@@ -59,12 +107,17 @@ function getRetryAfterMs(response: Response) {
   }
 
   return Math.min(
-    Math.max(0, retryAt - Date.now()),
-    MAX_RETRY_AFTER_MS
+    Math.max(
+      0,
+      retryAt - Date.now(),
+    ),
+    MAX_RETRY_AFTER_MS,
   );
 }
 
-function isGitHubRateLimited(response: Response) {
+function isGitHubRateLimited(
+  response: Response,
+) {
   if (response.status === 429) {
     return true;
   }
@@ -74,7 +127,9 @@ function isGitHubRateLimited(response: Response) {
   }
 
   return (
-    response.headers.get("x-ratelimit-remaining") === "0" ||
+    response.headers.get(
+      "x-ratelimit-remaining",
+    ) === "0" ||
     response.headers.has("retry-after")
   );
 }
@@ -82,23 +137,33 @@ function isGitHubRateLimited(response: Response) {
 async function fetchGitHubWithRetry(
   url: string,
   signal?: AbortSignal,
-  attempts = GITHUB_RETRY_ATTEMPTS
+  attempts = GITHUB_RETRY_ATTEMPTS,
 ) {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  for (
+    let attempt = 1;
+    attempt <= attempts;
+    attempt++
+  ) {
     try {
-      const response = await fetchWithTimeout(
-        url,
-        {
-          signal,
-        },
-        GITHUB_TIMEOUT_MS
-      );
+      const response =
+        await fetchWithTimeout(
+          url,
+          {
+            signal,
+          },
+          GITHUB_TIMEOUT_MS,
+        );
 
       const retryable =
-        isRetryableHttpStatus(response.status) ||
+        isRetryableHttpStatus(
+          response.status,
+        ) ||
         isGitHubRateLimited(response);
 
-      if (!retryable || attempt === attempts) {
+      if (
+        !retryable ||
+        attempt === attempts
+      ) {
         return response;
       }
 
@@ -106,7 +171,7 @@ async function fetchGitHubWithRetry(
         getRetryAfterMs(response) ??
         retryDelayMs(
           attempt,
-          GITHUB_RETRY_BASE_DELAY_MS
+          GITHUB_RETRY_BASE_DELAY_MS,
         );
 
       await wait(delay);
@@ -122,27 +187,153 @@ async function fetchGitHubWithRetry(
       await wait(
         retryDelayMs(
           attempt,
-          GITHUB_RETRY_BASE_DELAY_MS
-        )
+          GITHUB_RETRY_BASE_DELAY_MS,
+        ),
       );
     }
   }
 
   throw new Error(
-    "GitHub request failed after retries."
+    "GitHub request failed after retries.",
   );
+}
+
+async function fetchRealGitHubIssues(
+  owner: string,
+  repoName: string,
+  signal?: AbortSignal,
+): Promise<GitHubIssuesFetchResult> {
+  const maxImportedIssues =
+    getMaxImportedIssues();
+
+  const realIssues:
+    GitHubIssueResponse[] = [];
+
+  const seenIssueIds =
+    new Set<number>();
+
+  let page = 1;
+
+  while (
+    realIssues.length <
+      maxImportedIssues &&
+    page <= MAX_GITHUB_ISSUE_PAGES
+  ) {
+    const issuesResponse =
+      await fetchGitHubWithRetry(
+        `https://api.github.com/repos/${owner}/${repoName}/issues?state=open&per_page=${GITHUB_ISSUES_PER_PAGE}&page=${page}`,
+        signal,
+      );
+
+    if (
+      isGitHubRateLimited(
+        issuesResponse,
+      )
+    ) {
+      return {
+        success: false,
+        response: Response.json(
+          {
+            success: false,
+            error:
+              "GitHub API rate limit reached. Please try again later.",
+          },
+          {
+            status: 429,
+          },
+        ),
+      };
+    }
+
+    if (!issuesResponse.ok) {
+      return {
+        success: false,
+        response: Response.json(
+          {
+            success: false,
+            error:
+              "GitHub issues are temporarily unavailable.",
+          },
+          {
+            status: 502,
+          },
+        ),
+      };
+    }
+
+    const pageData: unknown =
+      await issuesResponse.json();
+
+    if (!Array.isArray(pageData)) {
+      return {
+        success: false,
+        response: Response.json(
+          {
+            success: false,
+            error:
+              "GitHub issues are temporarily unavailable.",
+          },
+          {
+            status: 502,
+          },
+        ),
+      };
+    }
+
+    const pageIssues =
+      pageData as GitHubIssueResponse[];
+
+    for (const issue of pageIssues) {
+      if (issue.pull_request) {
+        continue;
+      }
+
+      if (
+        seenIssueIds.has(issue.id)
+      ) {
+        continue;
+      }
+
+      seenIssueIds.add(issue.id);
+      realIssues.push(issue);
+
+      if (
+        realIssues.length >=
+        maxImportedIssues
+      ) {
+        break;
+      }
+    }
+
+    if (
+      pageIssues.length <
+        GITHUB_ISSUES_PER_PAGE ||
+      realIssues.length >=
+        maxImportedIssues
+    ) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return {
+    success: true,
+    issues: realIssues,
+  };
 }
 
 async function cleanupOldSessions() {
   const now = Date.now();
 
   const oneHourAgo = new Date(
-    now - 60 * 60 * 1000
+    now - 60 * 60 * 1000,
   );
 
-  const staleAnalysisBefore = new Date(
-    now - ANALYSIS_LEASE_MS
-  );
+  const staleAnalysisBefore =
+    new Date(
+      now - ANALYSIS_LEASE_MS,
+    );
 
   const safeToDeleteFilter = {
     OR: [
@@ -178,19 +369,23 @@ async function cleanupOldSessions() {
       },
     });
 
-  if (oldImportJobs.length === 0) {
+  if (
+    oldImportJobs.length === 0
+  ) {
     return;
   }
 
-  const oldImportJobIds = oldImportJobs.map(
-    (job) => job.id
-  );
+  const oldImportJobIds =
+    oldImportJobs.map(
+      (job) => job.id,
+    );
 
   const possibleOldRepositoryIds = [
     ...new Set(
       oldImportJobs.map(
-        (job) => job.repositoryId
-      )
+        (job) =>
+          job.repositoryId,
+      ),
     ),
   ];
 
@@ -215,21 +410,26 @@ async function cleanupOldSessions() {
       },
     });
 
-  const stillUsedRepositoryIds = new Set(
-    repositoriesStillInUse.map(
-      (job) => job.repositoryId
-    )
-  );
+  const stillUsedRepositoryIds =
+    new Set(
+      repositoriesStillInUse.map(
+        (job) =>
+          job.repositoryId,
+      ),
+    );
 
   const repositoryIdsToDelete =
     possibleOldRepositoryIds.filter(
       (repositoryId) =>
         !stillUsedRepositoryIds.has(
-          repositoryId
-        )
+          repositoryId,
+        ),
     );
 
-  if (repositoryIdsToDelete.length === 0) {
+  if (
+    repositoryIdsToDelete.length ===
+    0
+  ) {
     return;
   }
 
@@ -262,31 +462,41 @@ async function cleanupOldSessions() {
   });
 }
 
-export async function POST(request: Request) {
+export async function POST(
+  request: Request,
+) {
   try {
-    const body = await request.json();
-    const repoUrl = body.repoUrl;
+    const body: unknown =
+      await request.json();
 
     if (
-      !repoUrl ||
-      typeof repoUrl !== "string"
+      !body ||
+      typeof body !== "object" ||
+      !("repoUrl" in body) ||
+      typeof body.repoUrl !== "string"
     ) {
       return Response.json(
         {
           success: false,
-          error: "Repository URL is required.",
+          error:
+            "Repository URL is required.",
         },
-        { status: 400 }
+        {
+          status: 400,
+        },
       );
     }
 
-    const cleanRepoUrl = repoUrl.trim();
+    const cleanRepoUrl =
+      body.repoUrl.trim();
 
     const repoPattern =
       /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/?$/;
 
     const match =
-      cleanRepoUrl.match(repoPattern);
+      cleanRepoUrl.match(
+        repoPattern,
+      );
 
     if (!match) {
       return Response.json(
@@ -295,7 +505,9 @@ export async function POST(request: Request) {
           error:
             "Please enter a valid GitHub repository URL.",
         },
-        { status: 400 }
+        {
+          status: 400,
+        },
       );
     }
 
@@ -307,28 +519,38 @@ export async function POST(request: Request) {
     const githubResponse =
       await fetchGitHubWithRetry(
         `https://api.github.com/repos/${owner}/${repoName}`,
-        request.signal
+        request.signal,
       );
 
-    if (githubResponse.status === 404) {
+    if (
+      githubResponse.status === 404
+    ) {
       return Response.json(
         {
           success: false,
           error:
             "GitHub repository could not be found.",
         },
-        { status: 404 }
+        {
+          status: 404,
+        },
       );
     }
 
-    if (isGitHubRateLimited(githubResponse)) {
+    if (
+      isGitHubRateLimited(
+        githubResponse,
+      )
+    ) {
       return Response.json(
         {
           success: false,
           error:
             "GitHub API rate limit reached. Please try again later.",
         },
-        { status: 429 }
+        {
+          status: 429,
+        },
       );
     }
 
@@ -339,148 +561,268 @@ export async function POST(request: Request) {
           error:
             "GitHub repository lookup is temporarily unavailable.",
         },
-        { status: 502 }
-      );
-    }
-
-    const repoData: GitHubRepositoryResponse =
-      await githubResponse.json();
-
-    const issuesResponse =
-      await fetchGitHubWithRetry(
-        `https://api.github.com/repos/${owner}/${repoName}/issues?state=open&per_page=100`,
-        request.signal
-      );
-
-    if (isGitHubRateLimited(issuesResponse)) {
-      return Response.json(
         {
-          success: false,
-          error:
-            "GitHub API rate limit reached. Please try again later.",
+          status: 502,
         },
-        { status: 429 }
       );
     }
 
-    if (!issuesResponse.ok) {
-      return Response.json(
-        {
-          success: false,
-          error:
-            "GitHub issues are temporarily unavailable.",
-        },
-        { status: 502 }
+    const repoData =
+      (await githubResponse.json()) as
+        GitHubRepositoryResponse;
+
+    const issuesResult =
+      await fetchRealGitHubIssues(
+        owner,
+        repoName,
+        request.signal,
       );
+
+    if (!issuesResult.success) {
+      return issuesResult.response;
     }
 
-    const githubIssues: GitHubIssueResponse[] =
-      await issuesResponse.json();
+    const realIssues =
+      issuesResult.issues;
 
-    const realIssues = githubIssues
-      .filter(
-        (issue) => !issue.pull_request
-      )
-      .slice(0, 10);
+    const repositoryGithubId =
+      BigInt(repoData.id);
 
-    const repository =
-      await prisma.repository.upsert({
-        where: {
-          fullName: repoData.full_name,
-        },
-        update: {
-          owner: repoData.owner.login,
-          name: repoData.name,
-          githubId: BigInt(repoData.id),
-        },
-        create: {
-          owner: repoData.owner.login,
-          name: repoData.name,
-          fullName: repoData.full_name,
-          githubId: BigInt(repoData.id),
-        },
-      });
+    const importedGitHubIssueIds =
+      realIssues.map(
+        (issue) =>
+          BigInt(issue.id),
+      );
 
-    const importJob =
-      await prisma.importJob.create({
-        data: {
-          status: "importing",
-          repositoryId: repository.id,
-        },
-      });
+    const staleAnalysisBefore =
+      new Date(
+        Date.now() -
+          ANALYSIS_LEASE_MS,
+      );
 
-    for (const issue of realIssues) {
-      await prisma.issue.upsert({
-        where: {
-          githubIssueId: BigInt(issue.id),
-        },
-        update: {
-          issueNumber: issue.number,
-          title: issue.title,
-          body: issue.body,
-          state: issue.state,
-          author: issue.user.login,
-          githubUrl: issue.html_url,
-          createdAtGithub:
-            new Date(issue.created_at),
-          repositoryId: repository.id,
-        },
-        create: {
-          githubIssueId: BigInt(issue.id),
-          issueNumber: issue.number,
-          title: issue.title,
-          body: issue.body,
-          state: issue.state,
-          author: issue.user.login,
-          githubUrl: issue.html_url,
-          createdAtGithub:
-            new Date(issue.created_at),
-          repositoryId: repository.id,
-        },
-      });
-    }
+    const {
+      repository,
+      importJob,
+      savedIssues,
+    } = await prisma.$transaction(
+      async (tx) => {
+        const existingRepository =
+          await tx.repository.findUnique({
+            where: {
+              githubId:
+                repositoryGithubId,
+            },
+            select: {
+              id: true,
+            },
+          });
 
-    await prisma.importJob.update({
-      where: {
-        id: importJob.id,
+        if (existingRepository) {
+          const activeAnalysis =
+            await tx.importJob.findFirst({
+              where: {
+                repositoryId:
+                  existingRepository.id,
+                status: "analyzing",
+                analysisStartedAt: {
+                  gte:
+                    staleAnalysisBefore,
+                },
+              },
+              select: {
+                id: true,
+              },
+            });
+
+          if (activeAnalysis) {
+            throw new ActiveAnalysisConflictError();
+          }
+        }
+
+        const repository =
+          await tx.repository.upsert({
+            where: {
+              githubId:
+                repositoryGithubId,
+            },
+            update: {
+              owner:
+                repoData.owner.login,
+              name: repoData.name,
+              fullName:
+                repoData.full_name,
+            },
+            create: {
+              owner:
+                repoData.owner.login,
+              name: repoData.name,
+              fullName:
+                repoData.full_name,
+              githubId:
+                repositoryGithubId,
+            },
+          });
+
+        /*
+         * This product intentionally has one current snapshot per
+         * repository rather than import-history semantics.
+         *
+         * Re-importing the same GitHub repository therefore replaces
+         * the previous snapshot atomically. The surrounding transaction
+         * guarantees that a failed replacement restores the old job,
+         * issues, analyses, and repository metadata.
+         */
+        if (existingRepository) {
+          await tx.issueAnalysis.deleteMany({
+            where: {
+              issue: {
+                is: {
+                  repositoryId:
+                    repository.id,
+                },
+              },
+            },
+          });
+
+          await tx.issue.deleteMany({
+            where: {
+              repositoryId:
+                repository.id,
+            },
+          });
+
+          await tx.importJob.deleteMany({
+            where: {
+              repositoryId:
+                repository.id,
+            },
+          });
+        }
+
+        const importJob =
+          await tx.importJob.create({
+            data: {
+              status: "importing",
+              repositoryId:
+                repository.id,
+            },
+          });
+
+        if (realIssues.length > 0) {
+          await tx.issue.createMany({
+            data: realIssues.map(
+              (issue) => ({
+                githubIssueId:
+                  BigInt(issue.id),
+                issueNumber:
+                  issue.number,
+                title: issue.title,
+                body: issue.body,
+                state: issue.state,
+                author:
+                  issue.user.login,
+                githubUrl:
+                  issue.html_url,
+                createdAtGithub:
+                  new Date(
+                    issue.created_at,
+                  ),
+                repositoryId:
+                  repository.id,
+              }),
+            ),
+          });
+        }
+
+        await tx.importJob.update({
+          where: {
+            id: importJob.id,
+          },
+          data: {
+            status: "completed",
+            completedAt:
+              new Date(),
+          },
+        });
+
+        const savedIssues =
+          importedGitHubIssueIds.length ===
+          0
+            ? []
+            : await tx.issue.findMany({
+                where: {
+                  repositoryId:
+                    repository.id,
+                  githubIssueId: {
+                    in: importedGitHubIssueIds,
+                  },
+                },
+                orderBy: [
+                  {
+                    createdAtGithub:
+                      "desc",
+                  },
+                  {
+                    issueNumber:
+                      "desc",
+                  },
+                ],
+              });
+
+        return {
+          repository,
+          importJob,
+          savedIssues,
+        };
       },
-      data: {
-        status: "completed",
-        completedAt: new Date(),
+      {
+        maxWait: 5_000,
+        timeout: 10_000,
       },
-    });
-
-    const savedIssues =
-      await prisma.issue.findMany({
-        where: {
-          repositoryId: repository.id,
-        },
-        orderBy: {
-          importedAt: "desc",
-        },
-        take: 10,
-      });
+    );
 
     return Response.json({
       success: true,
       repo: repository.fullName,
-      issueCount: savedIssues.length,
-      importJobId: importJob.id,
+      issueCount:
+        savedIssues.length,
+      importJobId:
+        importJob.id,
       issues: savedIssues.map(
         (issue) => ({
           id: issue.id,
-          number: issue.issueNumber,
+          number:
+            issue.issueNumber,
           title: issue.title,
           url: issue.githubUrl,
           state: issue.state,
           author: issue.author,
           createdAt:
             issue.createdAtGithub,
-        })
+        }),
       ),
     });
   } catch (error) {
-    console.error("IMPORT_ERROR:", error);
+    if (
+      error instanceof
+      ActiveAnalysisConflictError
+    ) {
+      return Response.json(
+        {
+          success: false,
+          error:
+            "This repository is currently being analyzed. Wait for that analysis to finish before importing it again.",
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+
+    console.error(
+      "IMPORT_ERROR:",
+      error,
+    );
 
     return Response.json(
       {
@@ -488,7 +830,9 @@ export async function POST(request: Request) {
         error:
           "Temporary connection issue while importing. Please try again in a few seconds.",
       },
-      { status: 500 }
+      {
+        status: 500,
+      },
     );
   }
 }

@@ -71,6 +71,7 @@ const GEMINI_TIMEOUT_MS = 30_000;
 const GEMINI_RETRY_ATTEMPTS = 3;
 const GEMINI_RETRY_BASE_DELAY_MS = 1_000;
 const MAX_RETRY_AFTER_MS = 5_000;
+const GEMINI_BATCH_SIZE = 10;
 
 class NonRetryableGeminiError extends Error {
   constructor(message: string) {
@@ -515,20 +516,29 @@ async function analyzeWithCache(
     );
   }
 
-  let freshResults:
+  const freshResults:
     AnalysisResult[] = [];
 
-  if (
-    missingIssues.length > 0
+  for (
+    let startIndex = 0;
+    startIndex < missingIssues.length;
+    startIndex += GEMINI_BATCH_SIZE
   ) {
+    const batch =
+      missingIssues.slice(
+        startIndex,
+        startIndex + GEMINI_BATCH_SIZE,
+      );
+
     const freshBatch =
       await geminiBatchWithRetry(
-        missingIssues,
+        batch,
         signal,
       );
 
-    freshResults =
-      freshBatch.issues;
+    freshResults.push(
+      ...freshBatch.issues,
+    );
   }
 
   const freshByIssueId =
@@ -806,7 +816,6 @@ export async function POST(
                     analysis:
                       true,
                   },
-                  take: 10,
                   orderBy: {
                     importedAt:
                       "desc",

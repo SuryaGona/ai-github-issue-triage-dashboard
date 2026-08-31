@@ -41,7 +41,6 @@ export default async function DashboardPage({
               issues: {
                 include: { analysis: true },
                 orderBy: { importedAt: "desc" },
-                take: 10,
               },
             },
           },

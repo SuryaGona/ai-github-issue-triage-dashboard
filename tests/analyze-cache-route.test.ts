@@ -639,6 +639,146 @@ describe(
     );
 
     it(
+      "splits more than 10 cache misses into deterministic Gemini batches",
+      async () => {
+        const currentIssues =
+          Array.from(
+            { length: 23 },
+            (_, index) =>
+              issue(
+                `issue-${index + 1}`,
+                `Issue title ${index + 1}`,
+                `Issue body ${index + 1}`,
+              ),
+          );
+
+        readyJob(currentIssues);
+
+        const firstBatch =
+          currentIssues
+            .slice(0, 10)
+            .map((currentIssue) =>
+              analysis(currentIssue.id),
+            );
+
+        const secondBatch =
+          currentIssues
+            .slice(10, 20)
+            .map((currentIssue) =>
+              analysis(currentIssue.id),
+            );
+
+        const thirdBatch =
+          currentIssues
+            .slice(20)
+            .map((currentIssue) =>
+              analysis(currentIssue.id),
+            );
+
+        httpMocks.fetchWithTimeout
+          .mockResolvedValueOnce(
+            geminiResponse(firstBatch),
+          )
+          .mockResolvedValueOnce(
+            geminiResponse(secondBatch),
+          )
+          .mockResolvedValueOnce(
+            geminiResponse(thirdBatch),
+          );
+
+        const response =
+          await POST(
+            analyzeRequest(),
+          );
+
+        expect(
+          response.status,
+        ).toBe(200);
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          3,
+        );
+
+        const requestBodies =
+          httpMocks.fetchWithTimeout
+            .mock.calls.map(
+              ([, options]) =>
+                JSON.parse(
+                  String(options.body),
+                ),
+            );
+
+        const batchIssueIds =
+          requestBodies.map(
+            (requestBody) =>
+              requestBody
+                .generationConfig
+                .responseJsonSchema
+                .properties.issues
+                .items.properties
+                .issueId.enum,
+          );
+
+        expect(
+          batchIssueIds,
+        ).toEqual([
+          currentIssues
+            .slice(0, 10)
+            .map(
+              (currentIssue) =>
+                currentIssue.id,
+            ),
+          currentIssues
+            .slice(10, 20)
+            .map(
+              (currentIssue) =>
+                currentIssue.id,
+            ),
+          currentIssues
+            .slice(20)
+            .map(
+              (currentIssue) =>
+                currentIssue.id,
+            ),
+        ]);
+
+        expect(
+          requestBodies.map(
+            (requestBody) =>
+              requestBody
+                .generationConfig
+                .responseJsonSchema
+                .properties.issues
+                .minItems,
+          ),
+        ).toEqual([
+          10,
+          10,
+          3,
+        ]);
+
+        expect(
+          prismaMocks.txIssueAnalysisUpsert,
+        ).toHaveBeenCalledTimes(
+          23,
+        );
+
+        const data =
+          await response.json();
+
+        expect(
+          data.analyzedCount,
+        ).toBe(23);
+
+        expect(
+          data.analyses,
+        ).toHaveLength(23);
+      },
+    );
+
+    it(
       "does not cache Gemini output when database persistence fails",
       async () => {
         const currentIssue =

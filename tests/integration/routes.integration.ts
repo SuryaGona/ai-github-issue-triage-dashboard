@@ -8,9 +8,16 @@ import {
   vi,
 } from "vitest";
 
-import { POST as analyzeIssues } from "../../src/app/api/analyze/route";
-import { POST as importIssues } from "../../src/app/api/import/route";
-import { analysisCache } from "../../src/lib/analysis-cache";
+import {
+  POST as analyzeIssues,
+} from "../../src/app/api/analyze/route";
+import {
+  POST as importIssues,
+} from "../../src/app/api/import/route";
+import {
+  analysisCache,
+  createAnalysisCacheKey,
+} from "../../src/lib/analysis-cache";
 import { prisma } from "../../src/lib/prisma";
 
 type ImportResponse = {
@@ -41,8 +48,15 @@ type AnalysisFixture = {
     | "Security"
     | "Build"
     | "Other";
-  priority: "Critical" | "High" | "Medium" | "Low";
-  effort: "Small" | "Medium" | "Large";
+  priority:
+    | "Critical"
+    | "High"
+    | "Medium"
+    | "Low";
+  effort:
+    | "Small"
+    | "Medium"
+    | "Large";
   suggestedReply: string;
 };
 
@@ -52,8 +66,10 @@ const repositoryUrl =
 const repositoryApiUrl =
   "https://api.github.com/repos/acme/widget";
 
-const issuesApiUrl =
-  "https://api.github.com/repos/acme/widget/issues?state=open&per_page=100";
+const issuesPageUrl = (
+  page: number,
+) =>
+  `https://api.github.com/repos/acme/widget/issues?state=open&per_page=100&page=${page}`;
 
 const repositoryPayload = {
   id: 9001,
@@ -65,6 +81,37 @@ const repositoryPayload = {
     login: "acme",
   },
 };
+
+function makeGitHubIssue(
+  id: number,
+  number: number,
+  isPullRequest = false,
+) {
+  return {
+    id,
+    number,
+    title: `Issue ${number}`,
+    body: `Body for issue ${number}`,
+    state: "open",
+    user: {
+      login:
+        `user-${number}`,
+    },
+    html_url: isPullRequest
+      ? `https://github.com/acme/widget/pull/${number}`
+      : `https://github.com/acme/widget/issues/${number}`,
+    created_at:
+      "2026-08-01T12:00:00.000Z",
+    ...(isPullRequest
+      ? {
+          pull_request: {
+            url:
+              `https://api.github.com/repos/acme/widget/pulls/${number}`,
+          },
+        }
+      : {}),
+  };
+}
 
 const githubIssuesPayload = [
   {
@@ -119,13 +166,20 @@ const githubIssuesPayload = [
 ];
 
 function requestUrl(
-  input: string | URL | Request,
+  input:
+    | string
+    | URL
+    | Request,
 ) {
-  if (typeof input === "string") {
+  if (
+    typeof input === "string"
+  ) {
     return input;
   }
 
-  if (input instanceof URL) {
+  if (
+    input instanceof URL
+  ) {
     return input.toString();
   }
 
@@ -154,7 +208,8 @@ function jsonResponse(
 }
 
 function geminiResponse(
-  results: AnalysisFixture[],
+  results:
+    AnalysisFixture[],
 ) {
   return jsonResponse({
     candidates: [
@@ -165,15 +220,50 @@ function geminiResponse(
             {
               text:
                 JSON.stringify({
-                  issues: results,
+                  issues:
+                    results,
                 }),
             },
           ],
         },
-        finishReason: "STOP",
+        finishReason:
+          "STOP",
       },
     ],
   });
+}
+
+function analysisForIssueId(
+  issueId: string,
+): AnalysisFixture {
+  return {
+    issueId,
+    summary:
+      `Summary for ${issueId}`,
+    category: "Bug",
+    priority: "High",
+    effort: "Medium",
+    suggestedReply:
+      `Reply for ${issueId}`,
+  };
+}
+
+function geminiRequestedIssueIds(
+  init?: RequestInit,
+) {
+  const body = JSON.parse(
+    String(init?.body ?? "{}"),
+  );
+
+  return body
+    .generationConfig
+    .responseJsonSchema
+    .properties
+    .issues
+    .items
+    .properties
+    .issueId
+    .enum as string[];
 }
 
 async function resetDatabase() {
@@ -203,7 +293,7 @@ function stubGitHubFetch() {
       }
 
       if (
-        url === issuesApiUrl
+        url === issuesPageUrl(1)
       ) {
         return jsonResponse(
           githubIssuesPayload,
@@ -224,8 +314,63 @@ function stubGitHubFetch() {
   return fetchMock;
 }
 
+function stubGitHubPages(
+  pages: Map<
+    number,
+    unknown[]
+  >,
+) {
+  const fetchMock = vi.fn(
+    async (
+      input:
+        | string
+        | URL
+        | Request,
+    ): Promise<Response> => {
+      const url =
+        requestUrl(input);
+
+      if (
+        url === repositoryApiUrl
+      ) {
+        return jsonResponse(
+          repositoryPayload,
+        );
+      }
+
+      for (
+        const [
+          page,
+          payload,
+        ] of pages.entries()
+      ) {
+        if (
+          url ===
+          issuesPageUrl(page)
+        ) {
+          return jsonResponse(
+            payload,
+          );
+        }
+      }
+
+      throw new Error(
+        `Unexpected HTTP request during GitHub pagination fixture: ${url}`,
+      );
+    },
+  );
+
+  vi.stubGlobal(
+    "fetch",
+    fetchMock,
+  );
+
+  return fetchMock;
+}
+
 function stubGeminiFetch(
-  results: AnalysisFixture[],
+  results:
+    AnalysisFixture[],
 ) {
   const fetchMock = vi.fn(
     async (
@@ -261,8 +406,136 @@ function stubGeminiFetch(
   return fetchMock;
 }
 
+function stubGeminiByRequestedBatch() {
+  const requestedBatches:
+    string[][] = [];
+
+  const fetchMock = vi.fn(
+    async (
+      input:
+        | string
+        | URL
+        | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        requestUrl(input);
+
+      if (
+        !url.includes(
+          "generativelanguage.googleapis.com",
+        )
+      ) {
+        throw new Error(
+          `Unexpected HTTP request during Gemini batching fixture: ${url}`,
+        );
+      }
+
+      const issueIds =
+        geminiRequestedIssueIds(
+          init,
+        );
+
+      requestedBatches.push(
+        issueIds,
+      );
+
+      return geminiResponse(
+        issueIds.map(
+          analysisForIssueId,
+        ),
+      );
+    },
+  );
+
+  vi.stubGlobal(
+    "fetch",
+    fetchMock,
+  );
+
+  return {
+    fetchMock,
+    requestedBatches,
+  };
+}
+
+function stubGeminiLaterBatchFailure() {
+  const successfulBatchIds:
+    string[] = [];
+
+  let requestNumber = 0;
+
+  const fetchMock = vi.fn(
+    async (
+      input:
+        | string
+        | URL
+        | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        requestUrl(input);
+
+      if (
+        !url.includes(
+          "generativelanguage.googleapis.com",
+        )
+      ) {
+        throw new Error(
+          `Unexpected HTTP request during Gemini failure fixture: ${url}`,
+        );
+      }
+
+      requestNumber += 1;
+
+      const issueIds =
+        geminiRequestedIssueIds(
+          init,
+        );
+
+      if (
+        requestNumber === 1
+      ) {
+        successfulBatchIds.push(
+          ...issueIds,
+        );
+
+        return geminiResponse(
+          issueIds.map(
+            analysisForIssueId,
+          ),
+        );
+      }
+
+      return jsonResponse(
+        {
+          error: {
+            message:
+              "temporary Gemini failure",
+          },
+        },
+        500,
+        {
+          "Retry-After": "0",
+        },
+      );
+    },
+  );
+
+  vi.stubGlobal(
+    "fetch",
+    fetchMock,
+  );
+
+  return {
+    fetchMock,
+    successfulBatchIds,
+  };
+}
+
 function stubGemini429ThenSuccess(
-  results: AnalysisFixture[],
+  results:
+    AnalysisFixture[],
 ) {
   let attempt = 0;
 
@@ -337,7 +610,8 @@ async function importRepositoryFixture() {
     );
 
   const body =
-    (await response.json()) as ImportResponse;
+    (await response.json()) as
+      ImportResponse;
 
   expect(
     response.status,
@@ -389,19 +663,124 @@ function buildAnalysisResults(
   ];
 }
 
+async function seedAnalysisJob(
+  issueCount: number,
+) {
+  const repository =
+    await prisma.repository.create({
+      data: {
+        owner: "acme",
+        name:
+          "batch-analysis",
+        fullName:
+          "acme/batch-analysis",
+        githubId:
+          BigInt(9500),
+      },
+    });
+
+  const importJob =
+    await prisma.importJob.create({
+      data: {
+        status: "completed",
+        completedAt:
+          new Date(),
+        repositoryId:
+          repository.id,
+      },
+    });
+
+  const issues = [];
+
+  for (
+    let index = 0;
+    index < issueCount;
+    index++
+  ) {
+    const number =
+      index + 1;
+
+    const saved =
+      await prisma.issue.create({
+        data: {
+          githubIssueId:
+            BigInt(
+              9600 + index,
+            ),
+          issueNumber:
+            number,
+          title:
+            `Batch issue ${number}`,
+          body:
+            `Batch body ${number}`,
+          state: "open",
+          author:
+            `author-${number}`,
+          githubUrl:
+            `https://github.com/acme/batch-analysis/issues/${number}`,
+          createdAtGithub:
+            new Date(
+              "2026-08-10T12:00:00.000Z",
+            ),
+          repositoryId:
+            repository.id,
+        },
+      });
+
+    issues.push(saved);
+  }
+
+  return {
+    repository,
+    importJob,
+    issues,
+  };
+}
+
+async function analyzeJob(
+  importJobId: string,
+) {
+  return analyzeIssues(
+    new Request(
+      "http://localhost/api/analyze",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
+        body: JSON.stringify({
+          importJobId,
+        }),
+      },
+    ),
+  );
+}
+
 beforeEach(async () => {
   analysisCache.clear();
+
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+
+  vi.stubEnv(
+    "GEMINI_API_KEY",
+    "integration-test-key",
+  );
+
   await resetDatabase();
 });
 
 afterEach(() => {
   analysisCache.clear();
+
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 afterAll(async () => {
   analysisCache.clear();
+
   await resetDatabase();
   await prisma.$disconnect();
 });
@@ -447,35 +826,21 @@ describe(
         ]);
 
         const repository =
-          await prisma.repository.findUnique(
+          await prisma.repository.findUniqueOrThrow(
             {
               where: {
-                fullName:
-                  "acme/widget",
+                githubId:
+                  BigInt(9001),
               },
             },
           );
 
         expect(
-          repository,
-        ).not.toBeNull();
-
-        expect(
-          repository?.owner,
-        ).toBe("acme");
-
-        expect(
-          repository?.name,
-        ).toBe("widget");
-
-        expect(
-          repository?.githubId,
-        ).toBe(
-          BigInt(9001),
-        );
+          repository.fullName,
+        ).toBe("acme/widget");
 
         const importJob =
-          await prisma.importJob.findUnique(
+          await prisma.importJob.findUniqueOrThrow(
             {
               where: {
                 id:
@@ -485,23 +850,15 @@ describe(
           );
 
         expect(
-          importJob,
-        ).not.toBeNull();
-
-        expect(
-          importJob?.status,
+          importJob.status,
         ).toBe("completed");
-
-        expect(
-          importJob?.completedAt,
-        ).not.toBeNull();
 
         const savedIssues =
           await prisma.issue.findMany(
             {
               where: {
                 repositoryId:
-                  repository!.id,
+                  repository.id,
               },
               orderBy: {
                 issueNumber:
@@ -509,10 +866,6 @@ describe(
               },
             },
           );
-
-        expect(
-          savedIssues,
-        ).toHaveLength(2);
 
         expect(
           savedIssues.map(
@@ -523,28 +876,589 @@ describe(
           11,
           13,
         ]);
+      },
+    );
 
-        expect(
-          savedIssues.some(
-            (issue) =>
-              issue.issueNumber ===
-              12,
+    it(
+      "imports multiple GitHub pages, excludes pull requests, deduplicates repeated issues, and persists more than 10 issues",
+      async () => {
+        vi.stubEnv(
+          "GITHUB_IMPORT_MAX_ISSUES",
+          "23",
+        );
+
+        const pageOneRealIssues =
+          Array.from(
+            {
+              length: 20,
+            },
+            (_, index) =>
+              makeGitHubIssue(
+                10_000 + index,
+                100 + index,
+              ),
+          );
+
+        const pageOnePullRequests =
+          Array.from(
+            {
+              length: 80,
+            },
+            (_, index) =>
+              makeGitHubIssue(
+                20_000 + index,
+                200 + index,
+                true,
+              ),
+          );
+
+        const pageTwoNewIssues = [
+          makeGitHubIssue(
+            30_001,
+            301,
           ),
-        ).toBe(false);
+          makeGitHubIssue(
+            30_002,
+            302,
+          ),
+          makeGitHubIssue(
+            30_003,
+            303,
+          ),
+        ];
+
+        const pages = new Map<
+          number,
+          unknown[]
+        >([
+          [
+            1,
+            [
+              ...pageOneRealIssues,
+              ...pageOnePullRequests,
+            ],
+          ],
+          [
+            2,
+            [
+              pageOneRealIssues[0],
+              ...pageTwoNewIssues,
+              makeGitHubIssue(
+                30_004,
+                304,
+                true,
+              ),
+            ],
+          ],
+        ]);
+
+        const fetchMock =
+          stubGitHubPages(
+            pages,
+          );
+
+        const { body } =
+          await importRepositoryFixture();
 
         expect(
-          savedIssues[0]
-            .githubIssueId,
-        ).toBe(
-          BigInt(9101),
+          fetchMock,
+        ).toHaveBeenCalledTimes(
+          3,
         );
 
         expect(
-          savedIssues[1]
+          body.issueCount,
+        ).toBe(23);
+
+        expect(
+          body.issues,
+        ).toHaveLength(23);
+
+        const repository =
+          await prisma.repository.findUniqueOrThrow(
+            {
+              where: {
+                githubId:
+                  BigInt(9001),
+              },
+            },
+          );
+
+        const savedIssues =
+          await prisma.issue.findMany(
+            {
+              where: {
+                repositoryId:
+                  repository.id,
+              },
+            },
+          );
+
+        expect(
+          savedIssues,
+        ).toHaveLength(23);
+
+        expect(
+          new Set(
+            savedIssues.map(
+              (issue) =>
+                issue.githubIssueId.toString(),
+            ),
+          ).size,
+        ).toBe(23);
+
+        for (
+          const issue of
+          pageTwoNewIssues
+        ) {
+          expect(
+            savedIssues.some(
+              (saved) =>
+                saved.githubIssueId ===
+                BigInt(issue.id),
+            ),
+          ).toBe(true);
+        }
+      },
+    );
+
+    it(
+      "stops GitHub issue pagination at the hard page safety boundary",
+      async () => {
+        vi.stubEnv(
+          "GITHUB_IMPORT_MAX_ISSUES",
+          "500",
+        );
+
+        const pages = new Map<
+          number,
+          unknown[]
+        >();
+
+        for (
+          let page = 1;
+          page <= 10;
+          page++
+        ) {
+          pages.set(
+            page,
+            Array.from(
+              {
+                length: 100,
+              },
+              (_, index) =>
+                makeGitHubIssue(
+                  40_000 +
+                    page * 1_000 +
+                    index,
+                  page * 1_000 +
+                    index,
+                  true,
+                ),
+            ),
+          );
+        }
+
+        const fetchMock =
+          stubGitHubPages(
+            pages,
+          );
+
+        const { body } =
+          await importRepositoryFixture();
+
+        expect(
+          body.issueCount,
+        ).toBe(0);
+
+        expect(
+          await prisma.issue.count(),
+        ).toBe(0);
+
+        expect(
+          fetchMock,
+        ).toHaveBeenCalledTimes(
+          11,
+        );
+
+        const requestedUrls =
+          fetchMock.mock.calls.map(
+            ([input]) =>
+              requestUrl(input),
+          );
+
+        expect(
+          requestedUrls,
+        ).not.toContain(
+          issuesPageUrl(11),
+        );
+      },
+    );
+
+    it(
+      "replaces a repeated repository import with exactly the new snapshot",
+      async () => {
+        const firstIssue =
+          makeGitHubIssue(
+            51_001,
+            501,
+          );
+
+        const secondOldIssue =
+          makeGitHubIssue(
+            51_002,
+            502,
+          );
+
+        stubGitHubPages(
+          new Map([
+            [
+              1,
+              [
+                firstIssue,
+                secondOldIssue,
+              ],
+            ],
+          ]),
+        );
+
+        const firstImport =
+          await importRepositoryFixture();
+
+        const oldIssue =
+          await prisma.issue.findUniqueOrThrow(
+            {
+              where: {
+                githubIssueId:
+                  BigInt(
+                    firstIssue.id,
+                  ),
+              },
+            },
+          );
+
+        await prisma.issueAnalysis.create({
+          data: {
+            issueId:
+              oldIssue.id,
+            summary:
+              "Old analysis",
+            category: "Bug",
+            priority: "Low",
+            effort: "Small",
+            suggestedReply:
+              "Old reply",
+          },
+        });
+
+        const newIssue =
+          makeGitHubIssue(
+            52_001,
+            601,
+          );
+
+        stubGitHubPages(
+          new Map([
+            [
+              1,
+              [newIssue],
+            ],
+          ]),
+        );
+
+        const secondImport =
+          await importRepositoryFixture();
+
+        expect(
+          secondImport.body.importJobId,
+        ).not.toBe(
+          firstImport.body.importJobId,
+        );
+
+        expect(
+          await prisma.importJob.findUnique(
+            {
+              where: {
+                id:
+                  firstImport.body
+                    .importJobId!,
+              },
+            },
+          ),
+        ).toBeNull();
+
+        const repository =
+          await prisma.repository.findUniqueOrThrow(
+            {
+              where: {
+                githubId:
+                  BigInt(9001),
+              },
+            },
+          );
+
+        const currentIssues =
+          await prisma.issue.findMany({
+            where: {
+              repositoryId:
+                repository.id,
+            },
+          });
+
+        expect(
+          currentIssues,
+        ).toHaveLength(1);
+
+        expect(
+          currentIssues[0]
             .githubIssueId,
         ).toBe(
-          BigInt(9103),
+          BigInt(newIssue.id),
         );
+
+        expect(
+          await prisma.issue.findUnique(
+            {
+              where: {
+                githubIssueId:
+                  BigInt(
+                    firstIssue.id,
+                  ),
+              },
+            },
+          ),
+        ).toBeNull();
+
+        expect(
+          await prisma.issue.findUnique(
+            {
+              where: {
+                githubIssueId:
+                  BigInt(
+                    secondOldIssue.id,
+                  ),
+              },
+            },
+          ),
+        ).toBeNull();
+
+        expect(
+          await prisma.issueAnalysis.count(),
+        ).toBe(0);
+
+        expect(
+          await prisma.importJob.count({
+            where: {
+              repositoryId:
+                repository.id,
+            },
+          }),
+        ).toBe(1);
+      },
+    );
+
+    it(
+      "rolls back a failed repeated import and preserves the previous repository snapshot",
+      async () => {
+        const repository =
+          await prisma.repository.create({
+            data: {
+              owner: "acme",
+              name: "widget",
+              fullName:
+                "acme/widget",
+              githubId:
+                BigInt(9001),
+            },
+          });
+
+        const oldJob =
+          await prisma.importJob.create({
+            data: {
+              status:
+                "completed",
+              completedAt:
+                new Date(),
+              repositoryId:
+                repository.id,
+            },
+          });
+
+        const oldIssue =
+          await prisma.issue.create({
+            data: {
+              githubIssueId:
+                BigInt(60_001),
+              issueNumber: 701,
+              title:
+                "Existing snapshot issue",
+              body:
+                "Must survive rollback.",
+              state: "open",
+              author: "alice",
+              githubUrl:
+                "https://github.com/acme/widget/issues/701",
+              createdAtGithub:
+                new Date(
+                  "2026-08-01T12:00:00.000Z",
+                ),
+              repositoryId:
+                repository.id,
+            },
+          });
+
+        const oldAnalysis =
+          await prisma.issueAnalysis.create({
+            data: {
+              issueId:
+                oldIssue.id,
+              summary:
+                "Existing analysis",
+              category: "Bug",
+              priority: "High",
+              effort: "Medium",
+              suggestedReply:
+                "Existing reply",
+            },
+          });
+
+        const conflictingRepository =
+          await prisma.repository.create({
+            data: {
+              owner: "acme",
+              name:
+                "conflict",
+              fullName:
+                "acme/conflict",
+              githubId:
+                BigInt(90_001),
+            },
+          });
+
+        const conflictingIssueId =
+          BigInt(70_001);
+
+        await prisma.issue.create({
+          data: {
+            githubIssueId:
+              conflictingIssueId,
+            issueNumber: 1,
+            title:
+              "Conflict fixture",
+            body:
+              "Forces the new import createMany to fail.",
+            state: "open",
+            author: "bob",
+            githubUrl:
+              "https://github.com/acme/conflict/issues/1",
+            createdAtGithub:
+              new Date(
+                "2026-08-01T12:00:00.000Z",
+              ),
+            repositoryId:
+              conflictingRepository.id,
+          },
+        });
+
+        stubGitHubPages(
+          new Map([
+            [
+              1,
+              [
+                makeGitHubIssue(
+                  Number(
+                    conflictingIssueId,
+                  ),
+                  801,
+                ),
+              ],
+            ],
+          ]),
+        );
+
+        const consoleErrorSpy =
+          vi.spyOn(
+            console,
+            "error",
+          ).mockImplementation(
+            () => undefined,
+          );
+
+        const response =
+          await importIssues(
+            new Request(
+              "http://localhost/api/import",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type":
+                    "application/json",
+                },
+                body:
+                  JSON.stringify({
+                    repoUrl:
+                      repositoryUrl,
+                  }),
+              },
+            ),
+          );
+
+        expect(
+          response.status,
+        ).toBe(500);
+
+        expect(
+          await prisma.importJob.findUnique(
+            {
+              where: {
+                id: oldJob.id,
+              },
+            },
+          ),
+        ).not.toBeNull();
+
+        expect(
+          await prisma.issue.findUnique(
+            {
+              where: {
+                id: oldIssue.id,
+              },
+            },
+          ),
+        ).not.toBeNull();
+
+        expect(
+          await prisma.issueAnalysis.findUnique(
+            {
+              where: {
+                id:
+                  oldAnalysis.id,
+              },
+            },
+          ),
+        ).not.toBeNull();
+
+        expect(
+          await prisma.importJob.count({
+            where: {
+              repositoryId:
+                repository.id,
+            },
+          }),
+        ).toBe(1);
+
+        expect(
+          await prisma.issue.count({
+            where: {
+              repositoryId:
+                repository.id,
+            },
+          }),
+        ).toBe(1);
+
+        expect(
+          consoleErrorSpy,
+        ).toHaveBeenCalled();
       },
     );
 
@@ -557,18 +1471,12 @@ describe(
           await importRepositoryFixture();
 
         const issues =
-          await prisma.issue.findMany(
-            {
-              orderBy: {
-                issueNumber:
-                  "asc",
-              },
+          await prisma.issue.findMany({
+            orderBy: {
+              issueNumber:
+                "asc",
             },
-          );
-
-        expect(
-          issues,
-        ).toHaveLength(2);
+          });
 
         const analysisResults =
           buildAnalysisResults(
@@ -581,25 +1489,8 @@ describe(
           );
 
         const response =
-          await analyzeIssues(
-            new Request(
-              "http://localhost/api/analyze",
-              {
-                method:
-                  "POST",
-                headers: {
-                  "Content-Type":
-                    "application/json",
-                },
-                body:
-                  JSON.stringify(
-                    {
-                      importJobId:
-                        body.importJobId,
-                    },
-                  ),
-              },
-            ),
+          await analyzeJob(
+            body.importJobId!,
           );
 
         expect(
@@ -612,62 +1503,9 @@ describe(
           1,
         );
 
-        const savedAnalyses =
-          await prisma.issueAnalysis.findMany();
-
         expect(
-          savedAnalyses,
-        ).toHaveLength(2);
-
-        for (
-          const expected of analysisResults
-        ) {
-          const saved =
-            savedAnalyses.find(
-              (analysis) =>
-                analysis.issueId ===
-                expected.issueId,
-            );
-
-          expect(
-            saved,
-          ).toMatchObject({
-            issueId:
-              expected.issueId,
-            summary:
-              expected.summary,
-            category:
-              expected.category,
-            priority:
-              expected.priority,
-            effort:
-              expected.effort,
-            suggestedReply:
-              expected.suggestedReply,
-          });
-        }
-
-        const completedJob =
-          await prisma.importJob.findUniqueOrThrow(
-            {
-              where: {
-                id:
-                  body.importJobId!,
-              },
-            },
-          );
-
-        expect(
-          completedJob.status,
-        ).toBe("analyzed");
-
-        expect(
-          completedJob.analysisLeaseId,
-        ).toBeNull();
-
-        expect(
-          completedJob.analysisStartedAt,
-        ).toBeNull();
+          await prisma.issueAnalysis.count(),
+        ).toBe(2);
 
         const unexpectedFetch =
           vi.fn(
@@ -684,25 +1522,8 @@ describe(
         );
 
         const repeatedResponse =
-          await analyzeIssues(
-            new Request(
-              "http://localhost/api/analyze",
-              {
-                method:
-                  "POST",
-                headers: {
-                  "Content-Type":
-                    "application/json",
-                },
-                body:
-                  JSON.stringify(
-                    {
-                      importJobId:
-                        body.importJobId,
-                    },
-                  ),
-              },
-            ),
+          await analyzeJob(
+            body.importJobId!,
           );
 
         expect(
@@ -720,79 +1541,81 @@ describe(
     );
 
     it(
-      "recovers from a Gemini 429 rate limit and persists after retry",
+      "analyzes 23 issues in 10, 10, and 3 issue Gemini batches and persists every result",
       async () => {
-        stubGitHubFetch();
-
-        const { body } =
-          await importRepositoryFixture();
-
-        const issues =
-          await prisma.issue.findMany(
-            {
-              orderBy: {
-                issueNumber:
-                  "asc",
-              },
-            },
-          );
-
-        expect(
+        const {
+          importJob,
           issues,
-        ).toHaveLength(2);
-
-        const analysisResults =
-          buildAnalysisResults(
-            issues,
+        } =
+          await seedAnalysisJob(
+            23,
           );
 
-        const geminiFetch =
-          stubGemini429ThenSuccess(
-            analysisResults,
-          );
+        const {
+          fetchMock,
+          requestedBatches,
+        } =
+          stubGeminiByRequestedBatch();
 
         const response =
-          await analyzeIssues(
-            new Request(
-              "http://localhost/api/analyze",
-              {
-                method:
-                  "POST",
-                headers: {
-                  "Content-Type":
-                    "application/json",
-                },
-                body:
-                  JSON.stringify(
-                    {
-                      importJobId:
-                        body.importJobId,
-                    },
-                  ),
-              },
-            ),
+          await analyzeJob(
+            importJob.id,
           );
 
         expect(
           response.status,
         ).toBe(200);
 
+        const responseBody =
+          (await response.json()) as {
+            success: boolean;
+            analyzedCount: number;
+          };
+
         expect(
-          geminiFetch,
+          responseBody.analyzedCount,
+        ).toBe(23);
+
+        expect(
+          fetchMock,
         ).toHaveBeenCalledTimes(
-          2,
+          3,
+        );
+
+        expect(
+          requestedBatches.map(
+            (batch) =>
+              batch.length,
+          ),
+        ).toEqual([
+          10,
+          10,
+          3,
+        ]);
+
+        expect(
+          new Set(
+            requestedBatches.flat(),
+          ),
+        ).toEqual(
+          new Set(
+            issues.map(
+              (issue) =>
+                issue.id,
+            ),
+          ),
         );
 
         expect(
           await prisma.issueAnalysis.count(),
-        ).toBe(2);
+        ).toBe(23);
 
         const analyzedJob =
           await prisma.importJob.findUniqueOrThrow(
             {
               where: {
                 id:
-                  body.importJobId!,
+                  importJob.id,
               },
             },
           );
@@ -812,47 +1635,202 @@ describe(
     );
 
     it(
-      "rolls back persisted analysis when a PostgreSQL transaction fails",
+      "does not persist or cache partial analysis when a later Gemini batch fails",
       async () => {
-        const repository =
-          await prisma.repository.create(
+        const {
+          importJob,
+          issues,
+        } =
+          await seedAnalysisJob(
+            23,
+          );
+
+        const {
+          fetchMock,
+          successfulBatchIds,
+        } =
+          stubGeminiLaterBatchFailure();
+
+        const consoleLogSpy =
+          vi.spyOn(
+            console,
+            "log",
+          ).mockImplementation(
+            () => undefined,
+          );
+
+        const consoleErrorSpy =
+          vi.spyOn(
+            console,
+            "error",
+          ).mockImplementation(
+            () => undefined,
+          );
+
+        const response =
+          await analyzeJob(
+            importJob.id,
+          );
+
+        expect(
+          response.status,
+        ).toBe(500);
+
+        expect(
+          fetchMock,
+        ).toHaveBeenCalledTimes(
+          4,
+        );
+
+        expect(
+          successfulBatchIds,
+        ).toHaveLength(10);
+
+        expect(
+          await prisma.issueAnalysis.count(),
+        ).toBe(0);
+
+        const recoveredJob =
+          await prisma.importJob.findUniqueOrThrow(
             {
-              data: {
-                owner: "acme",
-                name:
-                  "rollback-demo",
-                fullName:
-                  "acme/rollback-demo",
-                githubId:
-                  BigInt(9201),
+              where: {
+                id:
+                  importJob.id,
               },
             },
           );
 
-        const issue =
-          await prisma.issue.create(
-            {
-              data: {
-                githubIssueId:
-                  BigInt(9202),
-                issueNumber: 21,
-                title:
-                  "Transaction rollback fixture",
-                body:
-                  "Used to prove real PostgreSQL rollback behavior.",
-                state: "open",
-                author: "alice",
-                githubUrl:
-                  "https://github.com/acme/rollback-demo/issues/21",
-                createdAtGithub:
-                  new Date(
-                    "2026-08-04T12:00:00.000Z",
-                  ),
-                repositoryId:
-                  repository.id,
-              },
-            },
+        expect(
+          recoveredJob.status,
+        ).toBe("completed");
+
+        expect(
+          recoveredJob.analysisLeaseId,
+        ).toBeNull();
+
+        expect(
+          recoveredJob.analysisStartedAt,
+        ).toBeNull();
+
+        const firstSuccessfulIssue =
+          issues.find(
+            (issue) =>
+              issue.id ===
+              successfulBatchIds[0],
           );
+
+        expect(
+          firstSuccessfulIssue,
+        ).toBeDefined();
+
+        expect(
+          analysisCache.get(
+            createAnalysisCacheKey({
+              title:
+                firstSuccessfulIssue!
+                  .title,
+              body:
+                firstSuccessfulIssue!
+                  .body,
+            }),
+          ),
+        ).toBeUndefined();
+
+        expect(
+          consoleLogSpy,
+        ).toHaveBeenCalled();
+
+        expect(
+          consoleErrorSpy,
+        ).toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "recovers from a Gemini 429 rate limit and persists after retry",
+      async () => {
+        stubGitHubFetch();
+
+        const { body } =
+          await importRepositoryFixture();
+
+        const issues =
+          await prisma.issue.findMany({
+            orderBy: {
+              issueNumber:
+                "asc",
+            },
+          });
+
+        const analysisResults =
+          buildAnalysisResults(
+            issues,
+          );
+
+        const geminiFetch =
+          stubGemini429ThenSuccess(
+            analysisResults,
+          );
+
+        const response =
+          await analyzeJob(
+            body.importJobId!,
+          );
+
+        expect(
+          response.status,
+        ).toBe(200);
+
+        expect(
+          geminiFetch,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        expect(
+          await prisma.issueAnalysis.count(),
+        ).toBe(2);
+      },
+    );
+
+    it(
+      "rolls back persisted analysis when a PostgreSQL transaction fails",
+      async () => {
+        const repository =
+          await prisma.repository.create({
+            data: {
+              owner: "acme",
+              name:
+                "rollback-demo",
+              fullName:
+                "acme/rollback-demo",
+              githubId:
+                BigInt(9201),
+            },
+          });
+
+        const issue =
+          await prisma.issue.create({
+            data: {
+              githubIssueId:
+                BigInt(9202),
+              issueNumber: 21,
+              title:
+                "Transaction rollback fixture",
+              body:
+                "Used to prove real PostgreSQL rollback behavior.",
+              state: "open",
+              author: "alice",
+              githubUrl:
+                "https://github.com/acme/rollback-demo/issues/21",
+              createdAtGithub:
+                new Date(
+                  "2026-08-04T12:00:00.000Z",
+                ),
+              repositoryId:
+                repository.id,
+            },
+          });
 
         await expect(
           prisma.$transaction(
