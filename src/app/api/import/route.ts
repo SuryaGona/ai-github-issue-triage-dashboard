@@ -5,29 +5,40 @@ import {
   wait,
 } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
+import { z } from "zod";
 
-type GitHubRepositoryResponse = {
-  id: number;
-  name: string;
-  full_name: string;
-  owner: {
-    login: string;
-  };
-};
+const githubRepositorySchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().min(1),
+  full_name: z.string().min(1),
+  owner: z.object({
+    login: z.string().min(1),
+  }),
+});
 
-type GitHubIssueResponse = {
-  id: number;
-  number: number;
-  title: string;
-  body: string | null;
-  state: string;
-  html_url: string;
-  created_at: string;
-  user: {
-    login: string;
-  };
-  pull_request?: unknown;
-};
+const githubIssueSchema = z.object({
+  id: z.number().int().positive(),
+  number: z.number().int().positive(),
+  title: z.string(),
+  body: z.string().nullable(),
+  state: z.string().min(1),
+  html_url: z.string().url(),
+  created_at: z.string().datetime(),
+  user: z.object({
+    login: z.string().min(1),
+  }),
+  pull_request: z.unknown().optional(),
+});
+
+const githubIssuesPageSchema = z.array(githubIssueSchema);
+
+type GitHubRepositoryResponse = z.infer<
+  typeof githubRepositorySchema
+>;
+
+type GitHubIssueResponse = z.infer<
+  typeof githubIssueSchema
+>;
 
 type GitHubIssuesFetchResult =
   | {
@@ -264,7 +275,17 @@ async function fetchRealGitHubIssues(
     const pageData: unknown =
       await issuesResponse.json();
 
-    if (!Array.isArray(pageData)) {
+    const pageResult =
+      githubIssuesPageSchema.safeParse(
+        pageData,
+      );
+
+    if (!pageResult.success) {
+      console.error(
+        "GITHUB_ISSUES_VALIDATION_ERROR:",
+        pageResult.error,
+      );
+
       return {
         success: false,
         response: Response.json(
@@ -281,7 +302,7 @@ async function fetchRealGitHubIssues(
     }
 
     const pageIssues =
-      pageData as GitHubIssueResponse[];
+      pageResult.data;
 
     for (const issue of pageIssues) {
       if (issue.pull_request) {
@@ -567,9 +588,35 @@ export async function POST(
       );
     }
 
-    const repoData =
-      (await githubResponse.json()) as
-        GitHubRepositoryResponse;
+    const rawRepoData: unknown =
+      await githubResponse.json();
+
+    const repoResult =
+      githubRepositorySchema.safeParse(
+        rawRepoData,
+      );
+
+    if (!repoResult.success) {
+      console.error(
+        "GITHUB_REPOSITORY_VALIDATION_ERROR:",
+        repoResult.error,
+      );
+
+      return Response.json(
+        {
+          success: false,
+          error:
+            "GitHub repository data is temporarily unavailable.",
+        },
+        {
+          status: 502,
+        },
+      );
+    }
+
+    const repoData:
+      GitHubRepositoryResponse =
+      repoResult.data;
 
     const issuesResult =
       await fetchRealGitHubIssues(

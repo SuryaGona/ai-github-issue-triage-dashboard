@@ -14,7 +14,9 @@ const prismaMocks = vi.hoisted(
     importJobFindUnique:
       vi.fn(),
     transaction: vi.fn(),
-    txIssueAnalysisUpsert:
+    txIssueAnalysisCreateMany:
+      vi.fn(),
+    txIssueAnalysisFindMany:
       vi.fn(),
     txImportJobUpdateMany:
       vi.fn(),
@@ -192,6 +194,47 @@ function readyJob(
   );
 }
 
+function persistedRowsFromLatestCreateMany() {
+  const calls =
+    prismaMocks
+      .txIssueAnalysisCreateMany
+      .mock.calls;
+
+  const latestCall =
+    calls[
+      calls.length - 1
+    ];
+
+  const rows =
+    latestCall?.[0]?.data ?? [];
+
+  return rows.map(
+    (
+      row: {
+        issueId: string;
+        summary: string;
+        category: string;
+        priority: string;
+        effort: string;
+        suggestedReply: string;
+      },
+      index: number,
+    ) => ({
+      id:
+        `analysis-${row.issueId}`,
+      ...row,
+      createdAt: new Date(
+        `2026-08-01T00:00:${String(
+          index,
+        ).padStart(
+          2,
+          "0",
+        )}.000Z`,
+      ),
+    }),
+  );
+}
+
 describe(
   "POST /api/analyze cache integration",
   () => {
@@ -216,18 +259,19 @@ describe(
         },
       );
 
-      prismaMocks.txIssueAnalysisUpsert.mockImplementation(
+      prismaMocks.txIssueAnalysisCreateMany.mockImplementation(
         async ({
-          create,
+          data,
+        }: {
+          data: unknown[];
         }) => ({
-          id:
-            `analysis-${create.issueId}`,
-          ...create,
-          createdAt:
-            new Date(
-              "2026-08-01T00:00:00.000Z",
-            ),
+          count: data.length,
         }),
+      );
+
+      prismaMocks.txIssueAnalysisFindMany.mockImplementation(
+        async () =>
+          persistedRowsFromLatestCreateMany(),
       );
 
       prismaMocks.transaction.mockImplementation(
@@ -235,8 +279,10 @@ describe(
           callback: (
             tx: {
               issueAnalysis: {
-                upsert:
-                  typeof prismaMocks.txIssueAnalysisUpsert;
+                createMany:
+                  typeof prismaMocks.txIssueAnalysisCreateMany;
+                findMany:
+                  typeof prismaMocks.txIssueAnalysisFindMany;
               };
               importJob: {
                 updateMany:
@@ -247,8 +293,10 @@ describe(
         ) =>
           callback({
             issueAnalysis: {
-              upsert:
-                prismaMocks.txIssueAnalysisUpsert,
+              createMany:
+                prismaMocks.txIssueAnalysisCreateMany,
+              findMany:
+                prismaMocks.txIssueAnalysisFindMany,
             },
             importJob: {
               updateMany:
@@ -318,6 +366,18 @@ describe(
 
         expect(
           httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisFindMany,
         ).toHaveBeenCalledTimes(
           1,
         );
@@ -407,30 +467,31 @@ describe(
         ).not.toHaveBeenCalled();
 
         expect(
-          prismaMocks.txIssueAnalysisUpsert,
-        ).toHaveBeenLastCalledWith(
-          expect.objectContaining({
-            where: {
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenLastCalledWith({
+          data: [
+            {
               issueId:
                 "issue-reimported",
+              summary:
+                "Summary for issue-original",
+              category:
+                "Bug",
+              priority:
+                "High",
+              effort:
+                "Medium",
+              suggestedReply:
+                "Reply for issue-original",
             },
-            create:
-              expect.objectContaining({
-                issueId:
-                  "issue-reimported",
-                summary:
-                  "Summary for issue-original",
-                category:
-                  "Bug",
-                priority:
-                  "High",
-                effort:
-                  "Medium",
-                suggestedReply:
-                  "Reply for issue-original",
-              }),
-          }),
-        );
+          ],
+        });
       },
     );
 
@@ -558,10 +619,45 @@ describe(
         );
 
         expect(
-          prismaMocks.txIssueAnalysisUpsert,
+          prismaMocks.txIssueAnalysisCreateMany,
         ).toHaveBeenCalledTimes(
-          2,
+          1,
         );
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenCalledWith({
+          data: [
+            {
+              issueId:
+                "cached-issue",
+              summary:
+                "Previously analyzed crash.",
+              category:
+                "Bug",
+              priority:
+                "High",
+              effort:
+                "Medium",
+              suggestedReply:
+                "Investigate the startup regression.",
+            },
+            {
+              issueId:
+                "missing-issue",
+              summary:
+                "Summary for missing-issue",
+              category:
+                "Performance",
+              priority:
+                "High",
+              effort:
+                "Medium",
+              suggestedReply:
+                "Reply for missing-issue",
+            },
+          ],
+        });
 
         expect(
           analysisCache.get(
@@ -632,6 +728,12 @@ describe(
 
         expect(
           httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
         ).toHaveBeenCalledTimes(
           1,
         );
@@ -760,9 +862,24 @@ describe(
         ]);
 
         expect(
-          prismaMocks.txIssueAnalysisUpsert,
+          prismaMocks.txIssueAnalysisCreateMany,
         ).toHaveBeenCalledTimes(
-          23,
+          1,
+        );
+
+        const createInput =
+          prismaMocks
+            .txIssueAnalysisCreateMany
+            .mock.calls[0][0];
+
+        expect(
+          createInput.data,
+        ).toHaveLength(23);
+
+        expect(
+          prismaMocks.txIssueAnalysisFindMany,
+        ).toHaveBeenCalledTimes(
+          1,
         );
 
         const data =

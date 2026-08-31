@@ -11,7 +11,8 @@ const prismaMocks = vi.hoisted(() => ({
   importJobUpdateMany: vi.fn(),
   importJobFindUnique: vi.fn(),
   transaction: vi.fn(),
-  txIssueAnalysisUpsert: vi.fn(),
+  txIssueAnalysisCreateMany: vi.fn(),
+  txIssueAnalysisFindMany: vi.fn(),
   txImportJobUpdateMany: vi.fn(),
 }));
 
@@ -186,6 +187,29 @@ function getClaimedLeaseId() {
   return leaseId as string;
 }
 
+function expectLeaseRefreshCall(
+  callIndex: number,
+  leaseId: string,
+) {
+  expect(
+    prismaMocks.importJobUpdateMany,
+  ).toHaveBeenNthCalledWith(
+    callIndex,
+    {
+      where: {
+        id: "job-1",
+        status: "analyzing",
+        analysisLeaseId:
+          leaseId,
+      },
+      data: {
+        analysisStartedAt:
+          expect.any(Date),
+      },
+    },
+  );
+}
+
 async function expectControlledFailure(
   response: Response,
 ) {
@@ -333,31 +357,80 @@ describe(
         },
       );
 
-      prismaMocks.txIssueAnalysisUpsert.mockImplementation(
-        async ({ create }) => ({
-          id: `analysis-${create.issueId}`,
-          ...create,
-          createdAt: new Date(
-            "2026-08-01T00:00:00.000Z",
-          ),
+      prismaMocks.txIssueAnalysisCreateMany.mockImplementation(
+        async ({
+          data,
+        }: {
+          data: unknown[];
+        }) => ({
+          count: data.length,
         }),
+      );
+
+      prismaMocks.txIssueAnalysisFindMany.mockImplementation(
+        async () => {
+          const calls =
+            prismaMocks
+              .txIssueAnalysisCreateMany
+              .mock.calls;
+
+          const latestCall =
+            calls[
+              calls.length - 1
+            ];
+
+          const rows =
+            latestCall?.[0]?.data ?? [];
+
+          return rows.map(
+            (
+              row: {
+                issueId: string;
+                summary: string;
+                category: string;
+                priority: string;
+                effort: string;
+                suggestedReply: string;
+              },
+              index: number,
+            ) => ({
+              id:
+                `analysis-${row.issueId}`,
+              ...row,
+              createdAt: new Date(
+                `2026-08-01T00:00:${String(
+                  index,
+                ).padStart(
+                  2,
+                  "0",
+                )}.000Z`,
+              ),
+            }),
+          );
+        },
       );
 
       prismaMocks.transaction.mockImplementation(
         async (
           callback: (tx: {
             issueAnalysis: {
-              upsert: typeof prismaMocks.txIssueAnalysisUpsert;
+              createMany:
+                typeof prismaMocks.txIssueAnalysisCreateMany;
+              findMany:
+                typeof prismaMocks.txIssueAnalysisFindMany;
             };
             importJob: {
-              updateMany: typeof prismaMocks.txImportJobUpdateMany;
+              updateMany:
+                typeof prismaMocks.txImportJobUpdateMany;
             };
           }) => Promise<unknown>,
         ) =>
           callback({
             issueAnalysis: {
-              upsert:
-                prismaMocks.txIssueAnalysisUpsert,
+              createMany:
+                prismaMocks.txIssueAnalysisCreateMany,
+              findMany:
+                prismaMocks.txIssueAnalysisFindMany,
             },
             importJob: {
               updateMany:
@@ -423,7 +496,7 @@ describe(
         ).resolves.toEqual({
           success: false,
           error:
-            "GEMINI_API_KEY is missing from .env.",
+            "AI analysis is not configured.",
         });
 
         expect(
@@ -645,7 +718,7 @@ describe(
     );
 
     it(
-      "sends the structured schema to Gemini and commits validated analyses plus job finalization in one transaction",
+      "sends the structured schema to Gemini, refreshes its lease, bulk-persists analyses, and finalizes atomically",
       async () => {
         mockReadyImportJob([
           unanalyzedIssue(
@@ -720,7 +793,11 @@ describe(
             .mock.calls[0];
 
         expect(url).toBe(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=test-gemini-key",
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        );
+
+        expect(url).not.toContain(
+          "test-gemini-key",
         );
 
         expect(
@@ -734,6 +811,8 @@ describe(
           headers: {
             "Content-Type":
               "application/json",
+            "x-goog-api-key":
+              "test-gemini-key",
           },
           signal:
             expect.any(
@@ -852,6 +931,25 @@ describe(
           '"id": "issue-3"',
         );
 
+        const leaseId =
+          getClaimedLeaseId();
+
+        expect(
+          prismaMocks.importJobUpdateMany,
+        ).toHaveBeenCalledTimes(
+          3,
+        );
+
+        expectLeaseRefreshCall(
+          2,
+          leaseId,
+        );
+
+        expectLeaseRefreshCall(
+          3,
+          leaseId,
+        );
+
         expect(
           prismaMocks.transaction,
         ).toHaveBeenCalledTimes(
@@ -867,13 +965,63 @@ describe(
         });
 
         expect(
-          prismaMocks.txIssueAnalysisUpsert,
+          prismaMocks.txIssueAnalysisCreateMany,
         ).toHaveBeenCalledTimes(
-          2,
+          1,
         );
 
-        const leaseId =
-          getClaimedLeaseId();
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenCalledWith({
+          data: [
+            {
+              issueId:
+                "issue-1",
+              summary:
+                "Application crashes during initialization.",
+              category: "Bug",
+              priority:
+                "Critical",
+              effort: "Medium",
+              suggestedReply:
+                "The startup failure appears to occur during initialization; a minimal reproduction would help isolate the failing path.",
+            },
+            {
+              issueId:
+                "issue-2",
+              summary:
+                "Installation guide is missing a setup command.",
+              category:
+                "Documentation",
+              priority: "Low",
+              effort: "Small",
+              suggestedReply:
+                "The installation guide should include the missing setup command in the documented sequence.",
+            },
+          ],
+        });
+
+        expect(
+          prismaMocks.txIssueAnalysisFindMany,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisFindMany,
+        ).toHaveBeenCalledWith({
+          where: {
+            issueId: {
+              in: [
+                "issue-1",
+                "issue-2",
+              ],
+            },
+          },
+          orderBy: {
+            createdAt: "asc",
+          },
+        });
 
         expect(
           prismaMocks.txImportJobUpdateMany,
@@ -899,12 +1047,6 @@ describe(
           },
         });
 
-        expect(
-          prismaMocks.importJobUpdateMany,
-        ).toHaveBeenCalledTimes(
-          1,
-        );
-
         const data =
           await response.json();
 
@@ -923,6 +1065,313 @@ describe(
         expect(
           data.analyses,
         ).toHaveLength(2);
+      },
+    );
+
+    it(
+      "refreshes lease ownership after every successful Gemini batch and again before persistence",
+      async () => {
+        const issues =
+          Array.from(
+            {
+              length: 11,
+            },
+            (_, index) =>
+              unanalyzedIssue(
+                `issue-${index + 1}`,
+              ),
+          );
+
+        mockReadyImportJob(
+          issues,
+        );
+
+        httpMocks.fetchWithTimeout
+          .mockResolvedValueOnce(
+            geminiResponse(
+              JSON.stringify({
+                issues: issues
+                  .slice(0, 10)
+                  .map((issue) =>
+                    validAnalysis(
+                      issue.id,
+                    ),
+                  ),
+              }),
+            ),
+          )
+          .mockResolvedValueOnce(
+            geminiResponse(
+              JSON.stringify({
+                issues: [
+                  validAnalysis(
+                    "issue-11",
+                  ),
+                ],
+              }),
+            ),
+          );
+
+        const response =
+          await POST(
+            analyzeRequest(
+              "job-1",
+            ),
+          );
+
+        expect(
+          response.status,
+        ).toBe(200);
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        const leaseId =
+          getClaimedLeaseId();
+
+        expect(
+          prismaMocks.importJobUpdateMany,
+        ).toHaveBeenCalledTimes(
+          4,
+        );
+
+        expectLeaseRefreshCall(
+          2,
+          leaseId,
+        );
+
+        expectLeaseRefreshCall(
+          3,
+          leaseId,
+        );
+
+        expectLeaseRefreshCall(
+          4,
+          leaseId,
+        );
+
+        expect(
+          prismaMocks.transaction,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        const createInput =
+          prismaMocks
+            .txIssueAnalysisCreateMany
+            .mock.calls[0][0];
+
+        expect(
+          createInput.data,
+        ).toHaveLength(11);
+
+        expect(
+          prismaMocks.txIssueAnalysisFindMany,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+      },
+    );
+
+    it(
+      "stops before persistence when lease ownership is lost during a heartbeat",
+      async () => {
+        mockReadyImportJob([
+          unanalyzedIssue(
+            "issue-1",
+          ),
+        ]);
+
+        httpMocks.fetchWithTimeout.mockResolvedValueOnce(
+          geminiResponse(
+            JSON.stringify({
+              issues: [
+                validAnalysis(
+                  "issue-1",
+                ),
+              ],
+            }),
+          ),
+        );
+
+        prismaMocks.importJobUpdateMany
+          .mockResolvedValueOnce({
+            count: 1,
+          })
+          .mockResolvedValueOnce({
+            count: 0,
+          });
+
+        const consoleErrorSpy =
+          vi
+            .spyOn(
+              console,
+              "error",
+            )
+            .mockImplementation(
+              () =>
+                undefined,
+            );
+
+        const response =
+          await POST(
+            analyzeRequest(
+              "job-1",
+            ),
+          );
+
+        await expectControlledFailure(
+          response,
+        );
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.transaction,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).not.toHaveBeenCalled();
+
+        const leaseId =
+          getClaimedLeaseId();
+
+        expectLeaseRefreshCall(
+          2,
+          leaseId,
+        );
+
+        expect(
+          prismaMocks.importJobUpdateMany,
+        ).toHaveBeenCalledTimes(
+          3,
+        );
+
+        expect(
+          prismaMocks.importJobUpdateMany,
+        ).toHaveBeenNthCalledWith(
+          3,
+          {
+            where: {
+              id: "job-1",
+              status:
+                "analyzing",
+              analysisLeaseId:
+                leaseId,
+            },
+            data: {
+              status:
+                "completed",
+              analysisLeaseId:
+                null,
+              analysisStartedAt:
+                null,
+            },
+          },
+        );
+
+        expect(
+          consoleErrorSpy,
+        ).toHaveBeenCalled();
+      },
+    );
+
+    it(
+      "fails atomically when persisted analysis count is incomplete",
+      async () => {
+        mockReadyImportJob([
+          unanalyzedIssue(
+            "issue-1",
+          ),
+          unanalyzedIssue(
+            "issue-2",
+          ),
+        ]);
+
+        httpMocks.fetchWithTimeout.mockResolvedValueOnce(
+          geminiResponse(
+            JSON.stringify({
+              issues: [
+                validAnalysis(
+                  "issue-1",
+                ),
+                validAnalysis(
+                  "issue-2",
+                ),
+              ],
+            }),
+          ),
+        );
+
+        prismaMocks.txIssueAnalysisFindMany.mockResolvedValueOnce(
+          [
+            {
+              id:
+                "analysis-issue-1",
+              ...validAnalysis(
+                "issue-1",
+              ),
+              createdAt:
+                new Date(),
+            },
+          ],
+        );
+
+        const consoleErrorSpy =
+          vi
+            .spyOn(
+              console,
+              "error",
+            )
+            .mockImplementation(
+              () =>
+                undefined,
+            );
+
+        const response =
+          await POST(
+            analyzeRequest(
+              "job-1",
+            ),
+          );
+
+        await expectControlledFailure(
+          response,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisFindMany,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txImportJobUpdateMany,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          consoleErrorSpy,
+        ).toHaveBeenCalled();
       },
     );
 
@@ -1242,7 +1691,13 @@ describe(
         );
 
         expect(
-          prismaMocks.txIssueAnalysisUpsert,
+          prismaMocks.txIssueAnalysisCreateMany,
+        ).toHaveBeenCalledTimes(
+          1,
+        );
+
+        expect(
+          prismaMocks.txIssueAnalysisFindMany,
         ).toHaveBeenCalledTimes(
           1,
         );
@@ -1252,8 +1707,24 @@ describe(
 
         expect(
           prismaMocks.importJobUpdateMany,
-        ).toHaveBeenNthCalledWith(
+        ).toHaveBeenCalledTimes(
+          4,
+        );
+
+        expectLeaseRefreshCall(
           2,
+          leaseId,
+        );
+
+        expectLeaseRefreshCall(
+          3,
+          leaseId,
+        );
+
+        expect(
+          prismaMocks.importJobUpdateMany,
+        ).toHaveBeenNthCalledWith(
+          4,
           {
             where: {
               id: "job-1",

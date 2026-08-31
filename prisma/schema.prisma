@@ -35,6 +35,9 @@ model Issue {
   repository   Repository @relation(fields: [repositoryId], references: [id])
 
   analysis IssueAnalysis?
+
+  @@index([repositoryId, importedAt(sort: Desc)])
+  @@index([repositoryId, createdAtGithub(sort: Desc), issueNumber(sort: Desc)])
 }
 
 model ImportJob {
@@ -47,6 +50,9 @@ model ImportJob {
 
   repositoryId String
   repository   Repository @relation(fields: [repositoryId], references: [id])
+
+  @@index([repositoryId, status, analysisStartedAt])
+  @@index([startedAt])
 }
 
 model IssueAnalysis {

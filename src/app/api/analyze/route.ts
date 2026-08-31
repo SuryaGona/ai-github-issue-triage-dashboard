@@ -54,6 +54,22 @@ const geminiBatchSchema = z
   })
   .strict();
 
+const geminiApiResponseSchema = z.object({
+  candidates: z
+    .array(
+      z.object({
+        content: z.object({
+          parts: z.array(
+            z.object({
+              text: z.string().optional(),
+            }),
+          ),
+        }),
+      }),
+    )
+    .min(1),
+});
+
 type AnalysisInput = {
   id: string;
   title: string;
@@ -275,6 +291,15 @@ async function geminiBatchWithRetry(
   attempts =
     GEMINI_RETRY_ATTEMPTS,
 ) {
+  const apiKey =
+    process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new NonRetryableGeminiError(
+      "GEMINI_API_KEY is not configured.",
+    );
+  }
+
   for (
     let attempt = 1;
     attempt <= attempts;
@@ -283,12 +308,14 @@ async function geminiBatchWithRetry(
     try {
       const response =
         await fetchWithTimeout(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
           {
             method: "POST",
             headers: {
               "Content-Type":
                 "application/json",
+              "x-goog-api-key":
+                apiKey,
             },
             signal,
             body: JSON.stringify({
@@ -401,19 +428,30 @@ ${JSON.stringify(
         continue;
       }
 
-      const data =
+      const rawData: unknown =
         await response.json();
 
-      const content =
-        data.candidates?.[0]
-          ?.content?.parts?.[0]
-          ?.text;
+      const responseResult =
+        geminiApiResponseSchema.safeParse(
+          rawData,
+        );
 
-      if (
-        !content ||
-        typeof content !==
-          "string"
-      ) {
+      if (!responseResult.success) {
+        throw new Error(
+          "Gemini returned an invalid response envelope.",
+        );
+      }
+
+      const content =
+        responseResult.data
+          .candidates[0]
+          .content.parts.find(
+            (part) =>
+              typeof part.text ===
+              "string",
+          )?.text;
+
+      if (!content) {
         throw new Error(
           "Gemini returned no content.",
         );
@@ -478,9 +516,37 @@ function toCachedAnalysis(
   };
 }
 
+async function refreshAnalysisLease(
+  importJobId: string,
+  leaseId: string,
+) {
+  const refreshResult =
+    await prisma.importJob.updateMany({
+      where: {
+        id: importJobId,
+        status: "analyzing",
+        analysisLeaseId:
+          leaseId,
+      },
+      data: {
+        analysisStartedAt:
+          new Date(),
+      },
+    });
+
+  if (
+    refreshResult.count !== 1
+  ) {
+    throw new Error(
+      "Analysis lease was lost while analysis was running.",
+    );
+  }
+}
+
 async function analyzeWithCache(
   issues: AnalysisInput[],
   signal?: AbortSignal,
+  onBatchComplete?: () => Promise<void>,
 ) {
   const cachedByIssueId =
     new Map<
@@ -539,6 +605,10 @@ async function analyzeWithCache(
     freshResults.push(
       ...freshBatch.issues,
     );
+
+    if (onBatchComplete) {
+      await onBatchComplete();
+    }
   }
 
   const freshByIssueId =
@@ -671,7 +741,7 @@ export async function POST(
         {
           success: false,
           error:
-            "GEMINI_API_KEY is missing from .env.",
+            "AI analysis is not configured.",
         },
         {
           status: 500,
@@ -905,55 +975,65 @@ export async function POST(
     } = await analyzeWithCache(
       aiInput,
       request.signal,
+      async () => {
+        await refreshAnalysisLease(
+          importJobId,
+          leaseId,
+        );
+      },
     );
+
+    await refreshAnalysisLease(
+      importJobId,
+      leaseId,
+    );
+
+    const analysisIssueIds =
+      aiResult.issues.map(
+        (result) =>
+          result.issueId,
+      );
 
     const savedAnalyses =
       await prisma.$transaction(
         async (tx) => {
-          const saved = [];
+          await tx.issueAnalysis.createMany({
+            data: aiResult.issues.map(
+              (result) => ({
+                issueId:
+                  result.issueId,
+                summary:
+                  result.summary,
+                category:
+                  result.category,
+                priority:
+                  result.priority,
+                effort:
+                  result.effort,
+                suggestedReply:
+                  result.suggestedReply,
+              }),
+            ),
+          });
 
-          for (
-            const result of
-              aiResult.issues
-          ) {
-            const savedAnalysis =
-              await tx.issueAnalysis.upsert(
-                {
-                  where: {
-                    issueId:
-                      result.issueId,
-                  },
-                  update: {
-                    summary:
-                      result.summary,
-                    category:
-                      result.category,
-                    priority:
-                      result.priority,
-                    effort:
-                      result.effort,
-                    suggestedReply:
-                      result.suggestedReply,
-                  },
-                  create: {
-                    issueId:
-                      result.issueId,
-                    summary:
-                      result.summary,
-                    category:
-                      result.category,
-                    priority:
-                      result.priority,
-                    effort:
-                      result.effort,
-                    suggestedReply:
-                      result.suggestedReply,
-                  },
+          const saved =
+            await tx.issueAnalysis.findMany({
+              where: {
+                issueId: {
+                  in: analysisIssueIds,
                 },
-              );
+              },
+              orderBy: {
+                createdAt: "asc",
+              },
+            });
 
-            saved.push(
-              savedAnalysis,
+          if (
+            saved.length !==
+            aiResult.issues.length
+          ) {
+            throw new Error(
+              "Not all analyses were persisted.",
             );
           }
 
@@ -995,6 +1075,16 @@ export async function POST(
         },
       );
 
+    const resultByIssueId =
+      new Map(
+        aiResult.issues.map(
+          (analysis) => [
+            analysis.issueId,
+            analysis,
+          ],
+        ),
+      );
+
     for (
       const issue of aiInput
     ) {
@@ -1007,10 +1097,8 @@ export async function POST(
       }
 
       const result =
-        aiResult.issues.find(
-          (analysis) =>
-            analysis.issueId ===
-            issue.id,
+        resultByIssueId.get(
+          issue.id,
         );
 
       if (!result) {
