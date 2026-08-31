@@ -120,6 +120,15 @@ type TransactionClientMock = {
   };
 };
 
+const expectedGitHubHeaders = {
+  Accept:
+    "application/vnd.github+json",
+  "X-GitHub-Api-Version":
+    "2026-03-10",
+  "User-Agent":
+    "ai-issue-triage-dashboard",
+};
+
 function transactionClient():
   TransactionClientMock {
   return {
@@ -408,6 +417,37 @@ describe(
     );
 
     it(
+      "rejects GitHub repository URLs containing query strings before calling GitHub or the database",
+      async () => {
+        const response = await POST(
+          importRequest(
+            "https://github.com/octo/repo?tab=issues",
+          ),
+        );
+
+        expect(
+          response.status,
+        ).toBe(400);
+
+        await expect(
+          response.json(),
+        ).resolves.toEqual({
+          success: false,
+          error:
+            "Please enter a valid GitHub repository URL.",
+        });
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          prismaMocks.transaction,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it(
       "returns 404 without retrying when GitHub reports that the repository does not exist",
       async () => {
         httpMocks.fetchWithTimeout.mockResolvedValueOnce(
@@ -668,6 +708,8 @@ describe(
           1,
           "https://api.github.com/repos/octo/repo",
           {
+            headers:
+              expectedGitHubHeaders,
             signal:
               request.signal,
           },
@@ -680,6 +722,8 @@ describe(
           2,
           "https://api.github.com/repos/octo/repo/issues?state=open&per_page=100&page=1",
           {
+            headers:
+              expectedGitHubHeaders,
             signal:
               request.signal,
           },
@@ -692,6 +736,8 @@ describe(
           3,
           "https://api.github.com/repos/octo/repo/issues?state=open&per_page=100&page=2",
           {
+            headers:
+              expectedGitHubHeaders,
             signal:
               request.signal,
           },
