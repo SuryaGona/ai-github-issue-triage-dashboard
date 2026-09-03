@@ -10,7 +10,7 @@ The app analyzes real GitHub issues and automatically generates:
 * effort estimates
 * suggested maintainer replies
 
-Built with Next.js, TypeScript, Tailwind CSS, Prisma, Neon PostgreSQL, Gemini API, and Vercel.
+Built with Next.js, TypeScript, Tailwind CSS, Prisma, Neon PostgreSQL, Gemini API, and Vercel as well.
 
 ---
 
