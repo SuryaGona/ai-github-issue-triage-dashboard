@@ -12,6 +12,7 @@ import {
   wait,
 } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
+import { logUnexpectedError } from "@/lib/server-logger";
 import { z } from "zod";
 
 const categorySchema = z.enum([
@@ -85,7 +86,8 @@ const ANALYSIS_LEASE_MS =
 
 const GEMINI_TIMEOUT_MS = 30_000;
 const GEMINI_RETRY_ATTEMPTS = 3;
-const GEMINI_RETRY_BASE_DELAY_MS = 1_000;
+const GEMINI_RETRY_BASE_DELAY_MS =
+  1_000;
 const MAX_RETRY_AFTER_MS = 5_000;
 const GEMINI_BATCH_SIZE = 10;
 
@@ -94,6 +96,14 @@ class NonRetryableGeminiError extends Error {
     super(message);
     this.name =
       "NonRetryableGeminiError";
+  }
+}
+
+class GeminiRateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name =
+      "GeminiRateLimitError";
   }
 }
 
@@ -308,7 +318,7 @@ async function geminiBatchWithRetry(
     try {
       const response =
         await fetchWithTimeout(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
           {
             method: "POST",
             headers: {
@@ -406,6 +416,14 @@ ${JSON.stringify(
         if (
           attempt === attempts
         ) {
+          if (
+            response.status === 429
+          ) {
+            throw new GeminiRateLimitError(
+              message,
+            );
+          }
+
           throw new Error(
             message,
           );
@@ -469,6 +487,13 @@ ${JSON.stringify(
       if (
         error instanceof
         NonRetryableGeminiError
+      ) {
+        throw error;
+      }
+
+      if (
+        error instanceof
+        GeminiRateLimitError
       ) {
         throw error;
       }
@@ -684,10 +709,14 @@ async function releaseAnalysisLease(
       },
     });
   } catch (error) {
-    console.error(
-      "ANALYSIS_LEASE_RELEASE_ERROR:",
+    logUnexpectedError({
+      operation:
+        "analysis.lease_release",
       error,
-    );
+      context: {
+        importJobId,
+      },
+    });
   }
 }
 
@@ -1142,10 +1171,23 @@ export async function POST(
       );
     }
 
-    console.error(
-      "ANALYZE_ERROR:",
-      error,
-    );
+    if (
+      !request.signal.aborted &&
+      !(
+        error instanceof
+        GeminiRateLimitError
+      )
+    ) {
+      logUnexpectedError({
+        operation:
+          "analysis.run",
+        error,
+        context: {
+          importJobId:
+            claimedImportJobId,
+        },
+      });
+    }
 
     return Response.json(
       {

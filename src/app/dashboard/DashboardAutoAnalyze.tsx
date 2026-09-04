@@ -3,7 +3,87 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
-type AnalyzeStatus = "loading" | "success" | "error";
+type AnalysisAttemptResult = {
+  success: boolean;
+  error: string | null;
+};
+
+const analysisRequests = new Map<
+  string,
+  Promise<AnalysisAttemptResult>
+>();
+
+function startAnalysis(
+  importJobId: string,
+): Promise<AnalysisAttemptResult> {
+  const existingRequest =
+    analysisRequests.get(importJobId);
+
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  const request = (async () => {
+    try {
+      const response = await fetch(
+        "/api/analyze",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            importJobId,
+          }),
+        },
+      );
+
+      const data: unknown =
+        await response
+          .json()
+          .catch(() => null);
+
+      const error =
+        data &&
+        typeof data === "object" &&
+        "error" in data &&
+        typeof data.error === "string"
+          ? data.error
+          : null;
+
+      return {
+        success: response.ok,
+        error,
+      };
+    } catch {
+      return {
+        success: false,
+        error:
+          "AI analysis failed. This may be a temporary model limit or connection issue.",
+      };
+    }
+  })();
+
+  analysisRequests.set(
+    importJobId,
+    request,
+  );
+
+  void request.finally(() => {
+    if (
+      analysisRequests.get(
+        importJobId,
+      ) === request
+    ) {
+      analysisRequests.delete(
+        importJobId,
+      );
+    }
+  });
+
+  return request;
+}
 
 export default function DashboardAutoAnalyze({
   importJobId,
@@ -12,107 +92,57 @@ export default function DashboardAutoAnalyze({
 }) {
   const router = useRouter();
 
-  const [status, setStatus] =
-    useState<AnalyzeStatus>("loading");
-
-  const [message, setMessage] = useState(
-    "AI analysis is running. This may take 10 to 20 seconds depending on the repository..."
-  );
+  const [error, setError] =
+    useState<string | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
-    let cancelled = false;
+    let active = true;
 
-    async function runAnalysis() {
-      try {
-        const response = await fetch("/api/analyze", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            importJobId,
-          }),
-          signal: controller.signal,
-        });
-
-        const data = await response.json();
-
-        if (cancelled) {
-          return;
-        }
-
-        if (!response.ok) {
-          setStatus("error");
-          setMessage(
-            data.error || "AI analysis failed."
-          );
-          return;
-        }
-
-        setStatus("success");
-
-        setMessage(
-          data.analyzedCount === 0
-            ? "AI analysis is already complete."
-            : "AI analysis complete."
-        );
-
-        router.refresh();
-      } catch (error) {
-        if (
-          cancelled ||
-          controller.signal.aborted ||
-          (error instanceof DOMException &&
-            error.name === "AbortError")
-        ) {
-          return;
-        }
-
-        setStatus("error");
-        setMessage(
-          "AI analysis failed. Please refresh and try again."
-        );
+    void startAnalysis(
+      importJobId,
+    ).then((result) => {
+      if (!active) {
+        return;
       }
-    }
 
-    void runAnalysis();
+      if (!result.success) {
+        setError(
+          result.error ??
+            "AI analysis failed. This may be a temporary model limit or connection issue.",
+        );
+
+        return;
+      }
+
+      router.refresh();
+    });
 
     return () => {
-      cancelled = true;
-      controller.abort();
+      active = false;
     };
   }, [importJobId, router]);
 
-  const isLoading = status === "loading";
-  const isError = status === "error";
-  const isSuccess = status === "success";
+  if (error) {
+    return (
+      <div className="mb-6 rounded-[22px] border border-red-400/25 bg-red-500/10 p-4 text-red-300 shadow-xl shadow-black/25 backdrop-blur-2xl">
+        <div className="flex items-center gap-3">
+          <div className="h-2.5 w-2.5 rounded-full bg-red-300 shadow-[0_0_18px_rgba(252,165,165,0.8)]" />
+
+          <p className="text-sm font-medium">
+            {error}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div
-      className={`mb-6 rounded-[22px] border p-4 shadow-xl shadow-black/25 backdrop-blur-2xl ${
-        isError
-          ? "border-red-400/25 bg-red-500/10 text-red-300"
-          : isSuccess
-            ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-300"
-            : "border-white/10 bg-white/[0.04] text-slate-300"
-      }`}
-    >
+    <div className="mb-6 rounded-[22px] border border-white/10 bg-white/[0.04] p-4 text-slate-300 shadow-xl shadow-black/25 backdrop-blur-2xl">
       <div className="flex items-center gap-3">
-        {isLoading && (
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-white" />
-        )}
-
-        {isError && (
-          <div className="h-2.5 w-2.5 rounded-full bg-red-300 shadow-[0_0_18px_rgba(252,165,165,0.8)]" />
-        )}
-
-        {isSuccess && (
-          <div className="h-2.5 w-2.5 rounded-full bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.8)]" />
-        )}
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-white" />
 
         <p className="text-sm font-medium">
-          {message}
+          AI analysis is running. This may take 10 to 20 seconds depending on the repository...
         </p>
       </div>
     </div>

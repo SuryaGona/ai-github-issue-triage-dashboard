@@ -11,6 +11,6 @@ Sentry.init({
   tracesSampleRate:
     process.env.NODE_ENV ===
     "production"
-      ? 0.05
-      : 0,
+      ? 0.1
+      : 1.0,
 });

@@ -26,7 +26,7 @@ type LruTtlCacheOptions = {
   now?: () => number;
 };
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.5-flash";
 const ANALYSIS_PROMPT_VERSION = "triage-prompt-v1";
 const ANALYSIS_SCHEMA_VERSION = "triage-schema-v1";
 

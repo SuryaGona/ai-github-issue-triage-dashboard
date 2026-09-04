@@ -142,12 +142,14 @@ function transactionClient():
       deleteMany:
         prismaMocks.importJobDeleteMany,
     },
+
     repository: {
       findUnique:
         prismaMocks.repositoryFindUnique,
       upsert:
         prismaMocks.repositoryUpsert,
     },
+
     issue: {
       createMany:
         prismaMocks.issueCreateMany,
@@ -156,6 +158,7 @@ function transactionClient():
       deleteMany:
         prismaMocks.issueDeleteMany,
     },
+
     issueAnalysis: {
       deleteMany:
         prismaMocks.issueAnalysisDeleteMany,
@@ -200,7 +203,8 @@ function makeGitHubIssue(
     id,
     number: id,
     title: `Issue ${id}`,
-    body: `Body for issue ${id}`,
+    body:
+      `Body for issue ${id}`,
     state: "open",
     html_url:
       `https://github.com/octo/repo/issues/${id}`,
@@ -224,17 +228,25 @@ function savedIssue(
   issue: ReturnType<
     typeof makeGitHubIssue
   >,
-  id = `saved-${issue.id}`,
+  id =
+    `saved-${issue.id}`,
 ) {
   return {
     id,
-    issueNumber: issue.number,
-    title: issue.title,
-    githubUrl: issue.html_url,
-    state: issue.state,
-    author: issue.user.login,
+    issueNumber:
+      issue.number,
+    title:
+      issue.title,
+    githubUrl:
+      issue.html_url,
+    state:
+      issue.state,
+    author:
+      issue.user.login,
     createdAtGithub:
-      new Date(issue.created_at),
+      new Date(
+        issue.created_at,
+      ),
   };
 }
 
@@ -273,6 +285,23 @@ function mockSuccessfulGitHubImport(
     .mockResolvedValueOnce(
       jsonResponse(issues),
     );
+}
+
+function persistReturnedIssues(
+  issues:
+    ReturnType<
+      typeof makeGitHubIssue
+    >[],
+) {
+  prismaMocks.issueFindMany.mockResolvedValue(
+    issues.map(
+      (currentIssue, index) =>
+        savedIssue(
+          currentIssue,
+          `issue-${index + 1}`,
+        ),
+    ),
+  );
 }
 
 describe(
@@ -316,21 +345,30 @@ describe(
 
       prismaMocks.repositoryUpsert.mockResolvedValue(
         {
-          id: "repository-1",
-          fullName: "octo/repo",
+          id:
+            "repository-1",
+          owner:
+            "octo",
+          name:
+            "repo",
+          fullName:
+            "octo/repo",
         },
       );
 
       prismaMocks.importJobCreate.mockResolvedValue(
         {
-          id: "import-job-1",
+          id:
+            "import-job-1",
         },
       );
 
       prismaMocks.importJobUpdate.mockResolvedValue(
         {
-          id: "import-job-1",
-          status: "completed",
+          id:
+            "import-job-1",
+          status:
+            "completed",
         },
       );
 
@@ -388,11 +426,12 @@ describe(
     it(
       "rejects an invalid GitHub repository URL before calling GitHub or the database",
       async () => {
-        const response = await POST(
-          importRequest(
-            "not-a-github-repository",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "not-a-github-repository",
+            ),
+          );
 
         expect(
           response.status,
@@ -403,7 +442,7 @@ describe(
         ).resolves.toEqual({
           success: false,
           error:
-            "Please enter a valid GitHub repository URL.",
+            "Enter a valid public GitHub repository URL like https://github.com/owner/repo.",
         });
 
         expect(
@@ -419,11 +458,12 @@ describe(
     it(
       "rejects GitHub repository URLs containing query strings before calling GitHub or the database",
       async () => {
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo?tab=issues",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo?tab=issues",
+            ),
+          );
 
         expect(
           response.status,
@@ -434,7 +474,7 @@ describe(
         ).resolves.toEqual({
           success: false,
           error:
-            "Please enter a valid GitHub repository URL.",
+            "Enter a valid public GitHub repository URL like https://github.com/owner/repo.",
         });
 
         expect(
@@ -451,14 +491,18 @@ describe(
       "returns 404 without retrying when GitHub reports that the repository does not exist",
       async () => {
         httpMocks.fetchWithTimeout.mockResolvedValueOnce(
-          jsonResponse({}, 404),
-        );
-
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/missing-repo",
+          jsonResponse(
+            {},
+            404,
           ),
         );
+
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/missing-repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -469,7 +513,7 @@ describe(
         ).resolves.toEqual({
           success: false,
           error:
-            "GitHub repository could not be found.",
+            "Repository not found or not publicly accessible.",
         });
 
         expect(
@@ -493,11 +537,14 @@ describe(
       async () => {
         httpMocks.fetchWithTimeout.mockResolvedValueOnce(
           jsonResponse({
-            id: "not-a-number",
+            id:
+              "not-a-number",
             name: "repo",
-            full_name: "octo/repo",
+            full_name:
+              "octo/repo",
             owner: {
-              login: "octo",
+              login:
+                "octo",
             },
           }),
         );
@@ -507,14 +554,16 @@ describe(
             console,
             "error",
           ).mockImplementation(
-            () => undefined,
+            () =>
+              undefined,
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -525,7 +574,7 @@ describe(
         ).resolves.toEqual({
           success: false,
           error:
-            "GitHub repository data is temporarily unavailable.",
+            "GitHub returned an unexpected repository response.",
         });
 
         expect(
@@ -570,14 +619,16 @@ describe(
             console,
             "error",
           ).mockImplementation(
-            () => undefined,
+            () =>
+              undefined,
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -588,7 +639,7 @@ describe(
         ).resolves.toEqual({
           success: false,
           error:
-            "GitHub issues are temporarily unavailable.",
+            "GitHub issues could not be loaded right now.",
         });
 
         expect(
@@ -612,8 +663,138 @@ describe(
     );
 
     it(
-      "paginates GitHub issues, filters pull requests, deduplicates issues, and imports up to the safe limit",
+      "imports at most 10 real issues by default",
       async () => {
+        const pageOneIssues =
+          Array.from(
+            {
+              length: 100,
+            },
+            (_, index) =>
+              makeGitHubIssue(
+                2000 +
+                  index,
+              ),
+          );
+
+        const expectedImportedIssues =
+          pageOneIssues.slice(
+            0,
+            10,
+          );
+
+        httpMocks.fetchWithTimeout
+          .mockResolvedValueOnce(
+            jsonResponse(
+              makeRepositoryResponse(),
+            ),
+          )
+          .mockResolvedValueOnce(
+            jsonResponse(
+              pageOneIssues,
+            ),
+          );
+
+        persistReturnedIssues(
+          expectedImportedIssues,
+        );
+
+        const request =
+          importRequest(
+            "https://github.com/octo/repo",
+          );
+
+        const response =
+          await POST(
+            request,
+          );
+
+        expect(
+          response.status,
+        ).toBe(200);
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenCalledTimes(
+          2,
+        );
+
+        expect(
+          httpMocks.fetchWithTimeout,
+        ).toHaveBeenNthCalledWith(
+          2,
+          "https://api.github.com/repos/octo/repo/issues?state=open&per_page=100&page=1",
+          {
+            headers:
+              expectedGitHubHeaders,
+            signal:
+              request.signal,
+          },
+          8_000,
+        );
+
+        const createManyInput =
+          prismaMocks
+            .issueCreateMany
+            .mock.calls[0][0];
+
+        expect(
+          createManyInput.data,
+        ).toHaveLength(
+          10,
+        );
+
+        expect(
+          createManyInput.data.map(
+            (issue: {
+              githubIssueId:
+                bigint;
+            }) =>
+              issue.githubIssueId,
+          ),
+        ).toEqual(
+          expectedImportedIssues.map(
+            (issue) =>
+              BigInt(
+                issue.id,
+              ),
+          ),
+        );
+
+        const data =
+          await response.json();
+
+        expect(
+          data,
+        ).toMatchObject({
+          success: true,
+          repository: {
+            owner: "octo",
+            name: "repo",
+            fullName:
+              "octo/repo",
+          },
+          issueCount: 10,
+          importJobId:
+            "import-job-1",
+        });
+
+        expect(
+          data.issues,
+        ).toHaveLength(
+          10,
+        );
+      },
+    );
+
+    it(
+      "supports configured larger imports with pagination, pull-request filtering, and deduplication",
+      async () => {
+        vi.stubEnv(
+          "GITHUB_IMPORT_MAX_ISSUES",
+          "100",
+        );
+
         const pageOneRealIssues =
           Array.from(
             {
@@ -621,7 +802,8 @@ describe(
             },
             (_, index) =>
               makeGitHubIssue(
-                2000 + index,
+                2000 +
+                  index,
               ),
           );
 
@@ -641,9 +823,15 @@ describe(
           pageOneRealIssues[0];
 
         const pageTwoRealIssues = [
-          makeGitHubIssue(3000),
-          makeGitHubIssue(3001),
-          makeGitHubIssue(3002),
+          makeGitHubIssue(
+            3000,
+          ),
+          makeGitHubIssue(
+            3001,
+          ),
+          makeGitHubIssue(
+            3002,
+          ),
         ];
 
         const pageTwo = [
@@ -662,10 +850,14 @@ describe(
             ),
           )
           .mockResolvedValueOnce(
-            jsonResponse(pageOne),
+            jsonResponse(
+              pageOne,
+            ),
           )
           .mockResolvedValueOnce(
-            jsonResponse(pageTwo),
+            jsonResponse(
+              pageTwo,
+            ),
           );
 
         const expectedImportedIssues = [
@@ -674,14 +866,8 @@ describe(
           pageTwoRealIssues[1],
         ];
 
-        prismaMocks.issueFindMany.mockResolvedValue(
-          expectedImportedIssues.map(
-            (issue, index) =>
-              savedIssue(
-                issue,
-                `issue-${index + 1}`,
-              ),
-          ),
+        persistReturnedIssues(
+          expectedImportedIssues,
         );
 
         const request =
@@ -690,7 +876,9 @@ describe(
           );
 
         const response =
-          await POST(request);
+          await POST(
+            request,
+          );
 
         expect(
           response.status,
@@ -749,7 +937,9 @@ describe(
         ).toHaveBeenCalledWith({
           where: {
             githubId:
-              BigInt(123456),
+              BigInt(
+                123456,
+              ),
           },
           update: {
             owner: "octo",
@@ -763,7 +953,9 @@ describe(
             fullName:
               "octo/repo",
             githubId:
-              BigInt(123456),
+              BigInt(
+                123456,
+              ),
           },
         });
 
@@ -780,12 +972,15 @@ describe(
 
         expect(
           createManyInput.data,
-        ).toHaveLength(100);
+        ).toHaveLength(
+          100,
+        );
 
         const persistedIds =
           createManyInput.data.map(
             (issue: {
-              githubIssueId: bigint;
+              githubIssueId:
+                bigint;
             }) =>
               issue.githubIssueId,
           );
@@ -795,7 +990,9 @@ describe(
         ).toEqual(
           expectedImportedIssues.map(
             (issue) =>
-              BigInt(issue.id),
+              BigInt(
+                issue.id,
+              ),
           ),
         );
 
@@ -858,9 +1055,16 @@ describe(
         const data =
           await response.json();
 
-        expect(data).toMatchObject({
+        expect(
+          data,
+        ).toMatchObject({
           success: true,
-          repo: "octo/repo",
+          repository: {
+            owner: "octo",
+            name: "repo",
+            fullName:
+              "octo/repo",
+          },
           issueCount: 100,
           importJobId:
             "import-job-1",
@@ -868,13 +1072,20 @@ describe(
 
         expect(
           data.issues,
-        ).toHaveLength(100);
+        ).toHaveLength(
+          100,
+        );
       },
     );
 
     it(
       "does not persist a partial import when a later GitHub issues page exhausts rate-limit retries",
       async () => {
+        vi.stubEnv(
+          "GITHUB_IMPORT_MAX_ISSUES",
+          "100",
+        );
+
         const firstPage = [
           ...Array.from(
             {
@@ -882,7 +1093,8 @@ describe(
             },
             (_, index) =>
               makeGitHubIssue(
-                4000 + index,
+                4000 +
+                  index,
               ),
           ),
           makeGitHubIssue(
@@ -898,13 +1110,16 @@ describe(
             ),
           )
           .mockResolvedValueOnce(
-            jsonResponse(firstPage),
+            jsonResponse(
+              firstPage,
+            ),
           )
           .mockResolvedValueOnce(
             new Response(
               "rate limited",
               {
-                status: 429,
+                status:
+                  429,
               },
             ),
           )
@@ -912,7 +1127,8 @@ describe(
             new Response(
               "rate limited",
               {
-                status: 429,
+                status:
+                  429,
               },
             ),
           )
@@ -920,16 +1136,18 @@ describe(
             new Response(
               "rate limited",
               {
-                status: 429,
+                status:
+                  429,
               },
             ),
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -937,6 +1155,10 @@ describe(
 
         expect(
           prismaMocks.transaction,
+        ).not.toHaveBeenCalled();
+
+        expect(
+          prismaMocks.issueCreateMany,
         ).not.toHaveBeenCalled();
       },
     );
@@ -949,7 +1171,8 @@ describe(
             new Response(
               "temporary failure",
               {
-                status: 500,
+                status:
+                  500,
               },
             ),
           )
@@ -959,14 +1182,17 @@ describe(
             ),
           )
           .mockResolvedValueOnce(
-            jsonResponse([]),
+            jsonResponse(
+              [],
+            ),
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -995,7 +1221,8 @@ describe(
             new Response(
               "rate limited",
               {
-                status: 429,
+                status:
+                  429,
                 headers: {
                   "retry-after":
                     "2",
@@ -1009,14 +1236,17 @@ describe(
             ),
           )
           .mockResolvedValueOnce(
-            jsonResponse([]),
+            jsonResponse(
+              [],
+            ),
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1038,7 +1268,8 @@ describe(
             new Response(
               "secondary rate limit",
               {
-                status: 403,
+                status:
+                  403,
                 headers: {
                   "retry-after":
                     "1",
@@ -1052,14 +1283,17 @@ describe(
             ),
           )
           .mockResolvedValueOnce(
-            jsonResponse([]),
+            jsonResponse(
+              [],
+            ),
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1088,14 +1322,17 @@ describe(
             ),
           )
           .mockResolvedValueOnce(
-            jsonResponse([]),
+            jsonResponse(
+              [],
+            ),
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1122,11 +1359,12 @@ describe(
           ),
         );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1156,7 +1394,8 @@ describe(
             new Response(
               "rate limited",
               {
-                status: 403,
+                status:
+                  403,
                 headers: {
                   "x-ratelimit-remaining":
                     "0",
@@ -1165,11 +1404,12 @@ describe(
             ),
         );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1210,11 +1450,12 @@ describe(
           [],
         );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1227,9 +1468,10 @@ describe(
           {
             where: {
               startedAt: {
-                lt: expect.any(
-                  Date,
-                ),
+                lt:
+                  expect.any(
+                    Date,
+                  ),
               },
               OR: [
                 {
@@ -1275,11 +1517,14 @@ describe(
       "atomically replaces an existing repository snapshot before creating the new import",
       async () => {
         const incomingIssue =
-          makeGitHubIssue(7001);
+          makeGitHubIssue(
+            7001,
+          );
 
         prismaMocks.repositoryFindUnique.mockResolvedValue(
           {
-            id: "repository-1",
+            id:
+              "repository-1",
           },
         );
 
@@ -1293,14 +1538,17 @@ describe(
         );
 
         mockSuccessfulGitHubImport(
-          [incomingIssue],
+          [
+            incomingIssue,
+          ],
         );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1310,12 +1558,19 @@ describe(
           prismaMocks.importJobFindFirst,
         ).toHaveBeenCalledWith({
           where: {
-            repositoryId:
-              "repository-1",
-            status: "analyzing",
+            repository: {
+              is: {
+                githubId:
+                  BigInt(123456),
+              },
+            },
+            status:
+              "analyzing",
             analysisStartedAt: {
               gte:
-                expect.any(Date),
+                expect.any(
+                  Date,
+                ),
             },
           },
           select: {
@@ -1367,13 +1622,15 @@ describe(
       async () => {
         prismaMocks.repositoryFindUnique.mockResolvedValue(
           {
-            id: "repository-1",
+            id:
+              "repository-1",
           },
         );
 
         prismaMocks.importJobFindFirst.mockResolvedValue(
           {
-            id: "active-job",
+            id:
+              "active-job",
           },
         );
 
@@ -1381,11 +1638,12 @@ describe(
           [],
         );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,
@@ -1429,15 +1687,17 @@ describe(
             console,
             "error",
           ).mockImplementation(
-            () => undefined,
+            () =>
+              undefined,
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-            controller.signal,
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+              controller.signal,
+            ),
+          );
 
         expect(
           response.status,
@@ -1459,7 +1719,7 @@ describe(
 
         expect(
           consoleErrorSpy,
-        ).toHaveBeenCalled();
+        ).not.toHaveBeenCalled();
       },
     );
 
@@ -1481,14 +1741,16 @@ describe(
             console,
             "error",
           ).mockImplementation(
-            () => undefined,
+            () =>
+              undefined,
           );
 
-        const response = await POST(
-          importRequest(
-            "https://github.com/octo/repo",
-          ),
-        );
+        const response =
+          await POST(
+            importRequest(
+              "https://github.com/octo/repo",
+            ),
+          );
 
         expect(
           response.status,

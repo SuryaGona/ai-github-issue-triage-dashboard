@@ -12,5 +12,5 @@ Sentry.init({
     process.env.NODE_ENV ===
     "production"
       ? 0.1
-      : 0,
+      : 1.0,
 });

@@ -50,6 +50,7 @@
     "vitest": "^4.1.11"
   },
   "overrides": {
-    "deepmerge-ts": "^8.0.1"
+    "deepmerge-ts": "^8.0.1",
+    "mysql2": "3.23.2"
   }
 }

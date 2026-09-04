@@ -5,6 +5,7 @@ import {
   wait,
 } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
+import { logUnexpectedError } from "@/lib/server-logger";
 import { z } from "zod";
 
 const githubRepositorySchema = z.object({
@@ -30,24 +31,22 @@ const githubIssueSchema = z.object({
   pull_request: z.unknown().optional(),
 });
 
-const githubIssuesPageSchema =
-  z.array(githubIssueSchema);
+const githubIssuesPageSchema = z.array(
+  githubIssueSchema,
+);
 
-type GitHubRepositoryResponse =
-  z.infer<
-    typeof githubRepositorySchema
-  >;
+type GitHubRepositoryResponse = z.infer<
+  typeof githubRepositorySchema
+>;
 
-type GitHubIssueResponse =
-  z.infer<
-    typeof githubIssueSchema
-  >;
+type GitHubIssueResponse = z.infer<
+  typeof githubIssueSchema
+>;
 
 type GitHubIssuesFetchResult =
   | {
       success: true;
-      issues:
-        GitHubIssueResponse[];
+      issues: GitHubIssueResponse[];
     }
   | {
       success: false;
@@ -61,15 +60,23 @@ type ParsedRepositoryUrl = {
 
 const GITHUB_TIMEOUT_MS = 8_000;
 const GITHUB_RETRY_ATTEMPTS = 3;
-const GITHUB_RETRY_BASE_DELAY_MS =
-  500;
+const GITHUB_RETRY_BASE_DELAY_MS = 500;
 const MAX_RETRY_AFTER_MS = 5_000;
 
 const GITHUB_ISSUES_PER_PAGE = 100;
-const DEFAULT_MAX_IMPORTED_ISSUES =
-  100;
-const HARD_MAX_IMPORTED_ISSUES =
-  500;
+
+/*
+ * Product default:
+ *
+ * 10 issues keeps the normal portfolio flow to one Gemini
+ * request while larger imports remain available explicitly.
+ *
+ * Larger imports remain available through the server-side
+ * GITHUB_IMPORT_MAX_ISSUES configuration.
+ */
+const DEFAULT_MAX_IMPORTED_ISSUES = 10;
+
+const HARD_MAX_IMPORTED_ISSUES = 500;
 const MAX_GITHUB_ISSUE_PAGES = 10;
 
 const ANALYSIS_LEASE_MS =
@@ -102,8 +109,7 @@ function parseGitHubRepositoryUrl(
   value: string,
 ): ParsedRepositoryUrl | null {
   try {
-    const url =
-      new URL(value);
+    const url = new URL(value);
 
     if (
       url.protocol !== "https:" ||
@@ -136,19 +142,11 @@ function parseGitHubRepositoryUrl(
       pathSegments[1];
 
     const repoName =
-      rawRepoName.endsWith(
-        ".git",
-      )
-        ? rawRepoName.slice(
-            0,
-            -4,
-          )
+      rawRepoName.endsWith(".git")
+        ? rawRepoName.slice(0, -4)
         : rawRepoName;
 
-    if (
-      !owner ||
-      !repoName
-    ) {
+    if (!owner || !repoName) {
       return null;
     }
 
@@ -385,17 +383,7 @@ async function fetchRealGitHubIssues(
     ) {
       return {
         success: false,
-        response:
-          Response.json(
-            {
-              success: false,
-              error:
-                "GitHub API rate limit reached. Please try again later.",
-            },
-            {
-              status: 429,
-            },
-          ),
+        response: issuesResponse,
       };
     }
 
@@ -404,50 +392,38 @@ async function fetchRealGitHubIssues(
     ) {
       return {
         success: false,
-        response:
-          Response.json(
-            {
-              success: false,
-              error:
-                "GitHub issues are temporarily unavailable.",
-            },
-            {
-              status: 502,
-            },
-          ),
+        response: issuesResponse,
       };
     }
 
-    const pageData:
+    const rawIssues:
       unknown =
       await issuesResponse.json();
 
     const pageResult =
       githubIssuesPageSchema.safeParse(
-        pageData,
+        rawIssues,
       );
 
     if (
       !pageResult.success
     ) {
-      console.error(
-        "GITHUB_ISSUES_VALIDATION_ERROR:",
-        pageResult.error,
-      );
+      logUnexpectedError({
+        operation:
+          "github.issues.response_validation",
+        error:
+          pageResult.error,
+        context: {
+          page,
+        },
+      });
 
       return {
         success: false,
         response:
-          Response.json(
-            {
-              success: false,
-              error:
-                "GitHub issues are temporarily unavailable.",
-            },
-            {
-              status: 502,
-            },
-          ),
+          new Response(null, {
+            status: 502,
+          }),
       };
     }
 
@@ -455,8 +431,7 @@ async function fetchRealGitHubIssues(
       pageResult.data;
 
     for (
-      const issue of
-      pageIssues
+      const issue of pageIssues
     ) {
       if (
         issue.pull_request
@@ -476,9 +451,7 @@ async function fetchRealGitHubIssues(
         issue.id,
       );
 
-      realIssues.push(
-        issue,
-      );
+      realIssues.push(issue);
 
       if (
         realIssues.length >=
@@ -573,8 +546,7 @@ async function cleanupOldSessions() {
 
   const oldImportJobIds =
     oldImportJobs.map(
-      (job) =>
-        job.id,
+      (job) => job.id,
     );
 
   const possibleOldRepositoryIds = [
@@ -675,22 +647,25 @@ export async function POST(
       unknown =
       await request.json();
 
+    const requestResult =
+      z
+        .object({
+          repoUrl:
+            z
+              .string()
+              .trim()
+              .min(1),
+        })
+        .safeParse(body);
+
     if (
-      !body ||
-      typeof body !==
-        "object" ||
-      !(
-        "repoUrl" in
-        body
-      ) ||
-      typeof body.repoUrl !==
-        "string"
+      !requestResult.success
     ) {
       return Response.json(
         {
           success: false,
           error:
-            "Repository URL is required.",
+            "Enter a valid GitHub repository URL.",
         },
         {
           status: 400,
@@ -698,22 +673,18 @@ export async function POST(
       );
     }
 
-    const cleanRepoUrl =
-      body.repoUrl.trim();
-
     const parsedRepository =
       parseGitHubRepositoryUrl(
-        cleanRepoUrl,
+        requestResult.data
+          .repoUrl,
       );
 
-    if (
-      !parsedRepository
-    ) {
+    if (!parsedRepository) {
       return Response.json(
         {
           success: false,
           error:
-            "Please enter a valid GitHub repository URL.",
+            "Enter a valid public GitHub repository URL like https://github.com/owner/repo.",
         },
         {
           status: 400,
@@ -724,12 +695,9 @@ export async function POST(
     const {
       owner,
       repoName,
-    } =
-      parsedRepository;
+    } = parsedRepository;
 
-    await cleanupOldSessions();
-
-    const githubResponse =
+    const repoResponse =
       await fetchGitHubWithRetry(
         githubApiUrl(
           owner,
@@ -739,31 +707,15 @@ export async function POST(
       );
 
     if (
-      githubResponse.status ===
-      404
-    ) {
-      return Response.json(
-        {
-          success: false,
-          error:
-            "GitHub repository could not be found.",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
-
-    if (
       isGitHubRateLimited(
-        githubResponse,
+        repoResponse,
       )
     ) {
       return Response.json(
         {
           success: false,
           error:
-            "GitHub API rate limit reached. Please try again later.",
+            "GitHub rate limit reached. Please wait a moment and try again.",
         },
         {
           status: 429,
@@ -772,13 +724,29 @@ export async function POST(
     }
 
     if (
-      !githubResponse.ok
+      repoResponse.status ===
+      404
     ) {
       return Response.json(
         {
           success: false,
           error:
-            "GitHub repository lookup is temporarily unavailable.",
+            "Repository not found or not publicly accessible.",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    if (
+      !repoResponse.ok
+    ) {
+      return Response.json(
+        {
+          success: false,
+          error:
+            "GitHub is temporarily unavailable. Please try again.",
         },
         {
           status: 502,
@@ -788,7 +756,7 @@ export async function POST(
 
     const rawRepoData:
       unknown =
-      await githubResponse.json();
+      await repoResponse.json();
 
     const repoResult =
       githubRepositorySchema.safeParse(
@@ -798,26 +766,24 @@ export async function POST(
     if (
       !repoResult.success
     ) {
-      console.error(
-        "GITHUB_REPOSITORY_VALIDATION_ERROR:",
-        repoResult.error,
-      );
+      logUnexpectedError({
+        operation:
+          "github.repository.response_validation",
+        error:
+          repoResult.error,
+      });
 
       return Response.json(
         {
           success: false,
           error:
-            "GitHub repository data is temporarily unavailable.",
+            "GitHub returned an unexpected repository response.",
         },
         {
           status: 502,
         },
       );
     }
-
-    const repoData:
-      GitHubRepositoryResponse =
-      repoResult.data;
 
     const issuesResult =
       await fetchRealGitHubIssues(
@@ -829,209 +795,244 @@ export async function POST(
     if (
       !issuesResult.success
     ) {
-      return (
-        issuesResult.response
+      if (
+        isGitHubRateLimited(
+          issuesResult.response,
+        )
+      ) {
+        return Response.json(
+          {
+            success: false,
+            error:
+              "GitHub rate limit reached. Please wait a moment and try again.",
+          },
+          {
+            status: 429,
+          },
+        );
+      }
+
+      return Response.json(
+        {
+          success: false,
+          error:
+            "GitHub issues could not be loaded right now.",
+        },
+        {
+          status:
+            issuesResult
+              .response.status ===
+            404
+              ? 404
+              : 502,
+        },
       );
     }
+
+    const repoData:
+      GitHubRepositoryResponse =
+      repoResult.data;
 
     const realIssues =
       issuesResult.issues;
 
     const repositoryGithubId =
-      BigInt(
-        repoData.id,
-      );
+      BigInt(repoData.id);
 
     const importedGitHubIssueIds =
       realIssues.map(
         (issue) =>
-          BigInt(
-            issue.id,
-          ),
+          BigInt(issue.id),
       );
 
-    const staleAnalysisBefore =
-      new Date(
-        Date.now() -
-          ANALYSIS_LEASE_MS,
-      );
-
-    const {
-      repository,
-      importJob,
-      savedIssues,
-    } =
+    const result =
       await prisma.$transaction(
         async (tx) => {
-          const existingRepository =
-            await tx.repository.findUnique(
-              {
-                where: {
-                  githubId:
-                    repositoryGithubId,
+          const activeAnalysis =
+            await tx.importJob.findFirst({
+              where: {
+                repository: {
+                  is: {
+                    githubId:
+                      repositoryGithubId,
+                  },
                 },
-                select: {
-                  id: true,
+                status:
+                  "analyzing",
+                analysisStartedAt: {
+                  gte: new Date(
+                    Date.now() -
+                      ANALYSIS_LEASE_MS,
+                  ),
                 },
               },
-            );
+              select: {
+                id: true,
+              },
+            });
 
-          if (
-            existingRepository
-          ) {
-            const activeAnalysis =
-              await tx.importJob.findFirst(
-                {
-                  where: {
-                    repositoryId:
-                      existingRepository.id,
-                    status:
-                      "analyzing",
-                    analysisStartedAt:
-                      {
-                        gte:
-                          staleAnalysisBefore,
-                      },
-                  },
-                  select: {
-                    id: true,
-                  },
-                },
-              );
-
-            if (
-              activeAnalysis
-            ) {
-              throw new ActiveAnalysisConflictError();
-            }
+          if (activeAnalysis) {
+            throw new ActiveAnalysisConflictError();
           }
 
-          const repository =
-            await tx.repository.upsert(
-              {
-                where: {
-                  githubId:
-                    repositoryGithubId,
-                },
-                update: {
-                  owner:
-                    repoData.owner.login,
-                  name:
-                    repoData.name,
-                  fullName:
-                    repoData.full_name,
-                },
-                create: {
-                  owner:
-                    repoData.owner.login,
-                  name:
-                    repoData.name,
-                  fullName:
-                    repoData.full_name,
-                  githubId:
-                    repositoryGithubId,
-                },
+          const existingRepository =
+            await tx.repository.findUnique({
+              where: {
+                githubId:
+                  repositoryGithubId,
               },
-            );
+              select: {
+                id: true,
+              },
+            });
+
+          const repository =
+            await tx.repository.upsert({
+              where: {
+                githubId:
+                  repositoryGithubId,
+              },
+              update: {
+                owner:
+                  repoData.owner
+                    .login,
+                name:
+                  repoData.name,
+                fullName:
+                  repoData.full_name,
+              },
+              create: {
+                owner:
+                  repoData.owner
+                    .login,
+                name:
+                  repoData.name,
+                fullName:
+                  repoData.full_name,
+                githubId:
+                  repositoryGithubId,
+              },
+            });
 
           /*
-           * This product intentionally has one current snapshot per
-           * repository rather than import-history semantics.
+           * The product intentionally maintains one current
+           * snapshot per repository rather than import-history
+           * semantics.
            *
-           * Re-importing the same GitHub repository therefore replaces
-           * the previous snapshot atomically. The surrounding transaction
-           * guarantees that a failed replacement restores the old job,
-           * issues, analyses, and repository metadata.
+           * Re-importing the same repository therefore replaces
+           * its previous issues, analyses, and jobs atomically.
            */
           if (
             existingRepository
           ) {
-            await tx.issueAnalysis.deleteMany(
-              {
-                where: {
-                  issue: {
-                    is: {
-                      repositoryId:
-                        repository.id,
-                    },
+            await tx.issueAnalysis.deleteMany({
+              where: {
+                issue: {
+                  is: {
+                    repositoryId:
+                      repository.id,
                   },
                 },
               },
-            );
+            });
 
-            await tx.issue.deleteMany(
-              {
-                where: {
-                  repositoryId:
-                    repository.id,
-                },
+            await tx.issue.deleteMany({
+              where: {
+                repositoryId:
+                  repository.id,
               },
-            );
+            });
 
-            await tx.importJob.deleteMany(
-              {
-                where: {
-                  repositoryId:
-                    repository.id,
-                },
+            await tx.importJob.deleteMany({
+              where: {
+                repositoryId:
+                  repository.id,
               },
-            );
+            });
           }
 
           const importJob =
-            await tx.importJob.create(
-              {
-                data: {
-                  status:
-                    "importing",
-                  repositoryId:
-                    repository.id,
-                },
+            await tx.importJob.create({
+              data: {
+                repositoryId:
+                  repository.id,
+                status:
+                  "importing",
               },
-            );
+            });
 
           if (
             realIssues.length >
             0
           ) {
-            await tx.issue.createMany(
-              {
-                data:
-                  realIssues.map(
-                    (
-                      issue,
-                    ) => ({
-                      githubIssueId:
-                        BigInt(
-                          issue.id,
-                        ),
-                      issueNumber:
-                        issue.number,
-                      title:
-                        issue.title,
-                      body:
-                        issue.body,
-                      state:
-                        issue.state,
-                      author:
-                        issue.user
-                          .login,
-                      githubUrl:
-                        issue.html_url,
+            await tx.issue.createMany({
+              data:
+                realIssues.map(
+                  (issue) => ({
+                    repositoryId:
+                      repository.id,
+                    githubIssueId:
+                      BigInt(
+                        issue.id,
+                      ),
+                    issueNumber:
+                      issue.number,
+                    title:
+                      issue.title,
+                    body:
+                      issue.body,
+                    state:
+                      issue.state,
+                    author:
+                      issue.user
+                        .login,
+                    githubUrl:
+                      issue.html_url,
+                    createdAtGithub:
+                      new Date(
+                        issue.created_at,
+                      ),
+                  }),
+                ),
+            });
+          }
+
+          const savedIssues =
+            importedGitHubIssueIds
+              .length > 0
+              ? await tx.issue.findMany({
+                  where: {
+                    repositoryId:
+                      repository.id,
+                    githubIssueId: {
+                      in:
+                        importedGitHubIssueIds,
+                    },
+                  },
+                  orderBy: [
+                    {
                       createdAtGithub:
-                        new Date(
-                          issue.created_at,
-                        ),
-                      repositoryId:
-                        repository.id,
-                    }),
-                  ),
-              },
+                        "desc",
+                    },
+                    {
+                      issueNumber:
+                        "desc",
+                    },
+                  ],
+                })
+              : [];
+
+          if (
+            savedIssues.length !==
+            realIssues.length
+          ) {
+            throw new Error(
+              "Imported issue persistence was incomplete.",
             );
           }
 
-          await tx.importJob.update(
-            {
+          const completedJob =
+            await tx.importJob.update({
               where: {
                 id:
                   importJob.id,
@@ -1042,64 +1043,44 @@ export async function POST(
                 completedAt:
                   new Date(),
               },
-            },
-          );
-
-          const savedIssues =
-            importedGitHubIssueIds.length ===
-            0
-              ? []
-              : await tx.issue.findMany(
-                  {
-                    where: {
-                      repositoryId:
-                        repository.id,
-                      githubIssueId:
-                        {
-                          in:
-                            importedGitHubIssueIds,
-                        },
-                    },
-                    orderBy: [
-                      {
-                        createdAtGithub:
-                          "desc",
-                      },
-                      {
-                        issueNumber:
-                          "desc",
-                      },
-                    ],
-                  },
-                );
+            });
 
           return {
+            importJob:
+              completedJob,
             repository,
-            importJob,
             savedIssues,
           };
         },
         {
-          maxWait:
-            5_000,
-          timeout:
-            10_000,
+          maxWait: 5_000,
+          timeout: 10_000,
         },
       );
 
+    await cleanupOldSessions();
+
     return Response.json({
       success: true,
-      repo:
-        repository.fullName,
+      repository: {
+        owner:
+          result.repository
+            .owner,
+        name:
+          result.repository
+            .name,
+        fullName:
+          result.repository
+            .fullName,
+      },
       issueCount:
-        savedIssues.length,
+        result.savedIssues.length,
       importJobId:
-        importJob.id,
+        result.importJob.id,
       issues:
-        savedIssues.map(
+        result.savedIssues.map(
           (issue) => ({
-            id:
-              issue.id,
+            id: issue.id,
             number:
               issue.issueNumber,
             title:
@@ -1132,10 +1113,19 @@ export async function POST(
       );
     }
 
-    console.error(
-      "IMPORT_ERROR:",
-      error,
-    );
+    /*
+     * Client cancellation is expected lifecycle behavior,
+     * not an operational incident.
+     */
+    if (
+      !request.signal.aborted
+    ) {
+      logUnexpectedError({
+        operation:
+          "repository.import",
+        error,
+      });
+    }
 
     return Response.json(
       {

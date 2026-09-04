@@ -22,7 +22,11 @@ import { prisma } from "../../src/lib/prisma";
 
 type ImportResponse = {
   success: boolean;
-  repo?: string;
+  repository?: {
+    owner: string;
+    name: string;
+    fullName: string;
+  };
   issueCount?: number;
   importJobId?: string;
   issues?: Array<{
@@ -804,8 +808,13 @@ describe(
         );
 
         expect(
-          body.repo,
-        ).toBe("acme/widget");
+          body.repository,
+        ).toEqual({
+          owner: "acme",
+          name: "widget",
+          fullName:
+            "acme/widget",
+        });
 
         expect(
           body.issueCount,
