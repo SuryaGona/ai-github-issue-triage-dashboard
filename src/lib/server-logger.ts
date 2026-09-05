@@ -1,4 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
+import { after } from "next/server";
 
 type LogContextValue =
   | string
@@ -140,6 +141,12 @@ export function logUnexpectedError({
           error,
         );
     });
+
+    if (process.env.VERCEL_ENV) {
+      after(() =>
+        Sentry.flush(2_000),
+      );
+    }
   }
 
   console.error(
